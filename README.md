@@ -5,9 +5,25 @@ Share a folder from your computer with anyone who has the link, right from the b
 - **Host:** open the page in Chrome or Edge on a computer, click **Choose shared folder…**, and share the code, link or QR code. Keep the tab open while sharing.
 - **Everyone else:** open the link (or enter the code) on any device. Download files from the host's folder and drop files to upload them straight into it.
 
-Files go directly between devices over WebRTC; nothing is uploaded to a server. The free public [PeerJS](https://peerjs.com) broker only introduces devices to each other, and its relay is used only when a direct connection isn't possible.
+Files go directly between devices over WebRTC; nothing is stored on a server. The free public [PeerJS](https://peerjs.com) broker only introduces devices to each other.
 
-The share code stays the same when the host reloads or switches networks, and guests reconnect on their own.
+When a network blocks direct connections between devices (common on staff/guest Wi-Fi), data goes through a Cloudflare TURN relay instead. It stays end-to-end encrypted, so the relay can't read it.
+
+The share code stays the same when the host reloads or switches networks, and guests reconnect on their own. The host sees who is connected (device, and public IP — browsers hide local network IPs).
+
+## Relay (worker/)
+
+`worker/` is a Cloudflare Worker that hands browsers short-lived TURN credentials, so the TURN key never appears in this public page. It also guards spending: it reads the account's TURN usage and stops issuing credentials at `RELAY_LIMIT_GB` (900 GB, ingress + egress, last 31 days), below Cloudflare's free 1,000 GB/month. If usage can't be read, it refuses (fail closed) and LAN Drop falls back to direct connections only.
+
+```
+cd worker
+npx wrangler deploy
+npx wrangler secret put TURN_KEY_ID          # Realtime > TURN Server
+npx wrangler secret put TURN_KEY_API_TOKEN
+npx wrangler secret put ANALYTICS_API_TOKEN  # API token with Account Analytics: Read
+```
+
+Set `RELAY_URL` in `app.js` to the Worker's URL, and list the site's origin in `ALLOWED_ORIGINS` in `worker/wrangler.toml`.
 
 ## Notes
 
