@@ -1,8 +1,13 @@
 // LAN Drop (web) — share a folder on this computer with anyone who has the link.
 // The host's browser reads/writes the folder via the File System Access API.
 // Files travel device-to-device over WebRTC; the public PeerJS broker only introduces peers.
+// When a network blocks direct connections, data goes through a Cloudflare TURN relay
+// (still end-to-end encrypted). worker/ hands out short-lived relay credentials.
 
 const $ = s => document.querySelector(s);
+const RELAY_URL = 'https://lan-drop-turn.mikkaiser-ribeiro.workers.dev'; // worker/; empty = direct connections only
+const STUN = [{ urls: 'stun:stun.cloudflare.com:3478' }, { urls: 'stun:stun.l.google.com:19302' }];
+const ICE_REFRESH = 60 * 60 * 1000; // relay credentials last 3 h; refresh well before then
 const PREFIX = 'landrop-';            // keeps our ids apart from other apps on the public broker
 const ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 const CHUNK = 64 * 1024;              // per WebRTC message
@@ -88,6 +93,72 @@ async function sendBlob(dc, id, blob, isCancelled = () => false, onProgress = ()
     onProgress(Math.min(off + BLOCK, blob.size));
   }
   return true;
+}
+
+// ICE servers for WebRTC: STUN always, plus TURN relay credentials from our Worker when available.
+// (PeerJS's built-in relay servers no longer exist, so we always pass our own list.)
+let iceConfig = { iceServers: STUN };
+let myPublicIp = '';   // reported by the Worker; sent to the host in 'hello'
+let relayProblem = ''; // why the relay is off, e.g. the monthly limit was reached
+async function loadIce() {
+  if (!RELAY_URL) return iceConfig;
+  try {
+    // Some networks can't reach every Cloudflare address, so don't hang on a dead one.
+    const res = await fetch(RELAY_URL, { cache: 'no-store', signal: AbortSignal.timeout(8000) });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      relayProblem = data.error || `relay error ${res.status}`;
+      iceConfig = { iceServers: STUN };
+      throw new Error(relayProblem);
+    }
+    relayProblem = '';
+    if (data.ip) myPublicIp = data.ip;
+    // Browsers time out on port 53 relay URLs, so drop those.
+    const servers = [].concat(data.iceServers || [])
+      .map(s => ({ ...s, urls: [].concat(s.urls).filter(u => !/:53(\?|$)/.test(u)) }))
+      .filter(s => s.urls.length);
+    if (servers.some(s => s.urls.some(u => u.startsWith('turn')))) iceConfig = { iceServers: servers };
+  } catch (e) { console.warn('relay unavailable, direct connections only', e); }
+  return iceConfig;
+}
+const iceReady = loadIce();
+const hasRelay = () => iceConfig.iceServers.some(s => [].concat(s.urls).some(u => u.startsWith('turn')));
+// Keep credentials fresh for long-running tabs (PeerJS reads options.config for each new
+// connection). Without a relay yet, try again every minute instead of every hour.
+(function refreshIce() {
+  setTimeout(() => loadIce().then(c => {
+    for (const p of [host.peer, guest.peer]) if (p && !p.destroyed) p.options.config = c;
+    if (host.peer) showRelayState();
+  }).finally(refreshIce), RELAY_URL && !hasRelay() ? 60 * 1000 : ICE_REFRESH);
+})();
+
+// Host only: say when the relay is off, since then only devices that can connect directly get in.
+function showRelayState() {
+  if (RELAY_URL && relayProblem) setNotice(`Relay is off: ${relayProblem}. Only devices that can connect directly can join right now.`);
+}
+
+// Which address a connection actually uses (from the chosen ICE candidate pair).
+async function remoteAddress(conn) {
+  const pc = conn.peerConnection;
+  if (!pc) return null;
+  const stats = await pc.getStats();
+  let pair = null;
+  stats.forEach(r => { if (r.type === 'transport' && r.selectedCandidatePairId) pair = stats.get(r.selectedCandidatePairId); });
+  if (!pair) stats.forEach(r => { if (r.type === 'candidate-pair' && r.nominated && r.state === 'succeeded') pair = r; });
+  const remote = pair && stats.get(pair.remoteCandidateId);
+  if (!remote) return null;
+  return { ip: remote.address || remote.ip || '', type: remote.candidateType };
+}
+
+// "iPhone · Safari" style label so the host can tell devices apart.
+function deviceLabel() {
+  const ua = navigator.userAgent;
+  const os = /iPhone/.test(ua) ? 'iPhone' : /iPad/.test(ua) || (/Macintosh/.test(ua) && navigator.maxTouchPoints > 1) ? 'iPad'
+    : /Android/.test(ua) ? 'Android' : /Windows/.test(ua) ? 'Windows' : /Mac OS X|Macintosh/.test(ua) ? 'Mac'
+    : /CrOS/.test(ua) ? 'ChromeOS' : /Linux/.test(ua) ? 'Linux' : 'Device';
+  const browser = /Edg\//.test(ua) ? 'Edge' : /OPR\//.test(ua) ? 'Opera' : /Firefox\//.test(ua) ? 'Firefox'
+    : /Chrome\/|CriOS\//.test(ua) ? 'Chrome' : /Safari\//.test(ua) ? 'Safari' : 'Browser';
+  return `${os} · ${browser}`;
 }
 
 // Tiny IndexedDB key-value store, used to remember the host's folder between visits.
@@ -236,7 +307,8 @@ function showApp() {
 
 // ---------- HOST: owns the folder, serves it to guests ----------
 
-const host = { dir: null, code: null, peer: null, guests: new Set(), incoming: new Set(), key: '', scanning: false, retries: 0 };
+// guests: conn -> { device, addr } for the "who's connected" list
+const host = { dir: null, code: null, peer: null, guests: new Map(), incoming: new Set(), key: '', scanning: false, retries: 0 };
 
 async function listDir() {
   const out = [];
@@ -257,7 +329,7 @@ async function rescan() {
     if (key !== host.key) {
       host.key = key;
       setFiles(list);
-      for (const c of host.guests) sendJSON(c.dataChannel, { t: 'files', files: list });
+      for (const c of host.guests.keys()) sendJSON(c.dataChannel, { t: 'files', files: list });
     }
   } catch (e) {
     setNotice('Lost access to the folder (' + e.message + '). Click "Stop sharing" and choose it again.');
@@ -305,9 +377,13 @@ function acceptGuest(conn) {
   const gets = new Map(), puts = new Map();
 
   conn.on('open', () => {
-    host.guests.add(conn);
+    const info = { device: 'Connecting device', addr: null };
+    host.guests.set(conn, info);
     updateGuestCount();
     sendJSON(conn.dataChannel, { t: 'files', files });
+    // The chosen route can change in the first seconds, so look twice.
+    const lookup = () => remoteAddress(conn).then(a => { if (a && host.guests.has(conn)) { info.addr = a; updateGuestCount(); } }).catch(() => {});
+    lookup(); setTimeout(lookup, 3000);
   });
 
   conn.on('data', async d => {
@@ -322,7 +398,14 @@ function acceptGuest(conn) {
     }
     let m; try { m = JSON.parse(d); } catch { return; }
 
-    if (m.t === 'get') {
+    if (m.t === 'hello') {
+      const info = host.guests.get(conn);
+      if (info) {
+        info.device = String(m.device || '').slice(0, 40) || 'Unknown device';
+        info.publicIp = String(m.ip || '').slice(0, 45);
+        updateGuestCount();
+      }
+    } else if (m.t === 'get') {
       let cancelled = false;
       gets.set(m.id, () => { cancelled = true; });
       try {
@@ -367,10 +450,24 @@ function acceptGuest(conn) {
   });
 }
 
+// Best address we can show: the real one if the browser reveals it, else the guest's public IP.
+// (Browsers hide local network IPs from web pages, so on a LAN the public IP is often all we get.)
+function guestAddress({ addr, publicIp }) {
+  const relay = addr?.type === 'relay' ? ' · via relay' : '';
+  if (addr?.ip && !addr.ip.endsWith('.local') && addr.type !== 'relay') return addr.ip;
+  if (publicIp) return `${publicIp} (public)${relay}`;
+  if (!addr) return 'finding address…';
+  return relay ? 'via relay (IP hidden)' : 'IP hidden by browser';
+}
+
 function updateGuestCount() {
+  const list = $('#guestList');
+  list.replaceChildren(...[...host.guests.values()].map(g =>
+    el('li', {}, el('span', { textContent: g.device }), el('code', { textContent: guestAddress(g) }))));
+  list.hidden = !host.guests.size;
   if (!host.peer || host.peer.disconnected) return;
   const n = host.guests.size;
-  setStatus(n ? `Sharing · ${n} device${n > 1 ? 's' : ''} connected` : 'Sharing · waiting for others to join', true);
+  setStatus(n ? `Sharing · ${n} ${n > 1 ? 'people' : 'person'} connected` : 'Sharing · waiting for others to join', true);
 }
 
 function showHostCode() {
@@ -383,10 +480,11 @@ function showHostCode() {
   }
 }
 
-function openHostPeer() {
-  const peer = host.peer = new Peer(PREFIX + host.code);
+async function openHostPeer() {
+  await iceReady;
+  const peer = host.peer = new Peer(PREFIX + host.code, { config: iceConfig });
   setStatus('Connecting to the broker…', false);
-  peer.on('open', () => { host.retries = 0; setNotice(''); updateGuestCount(); });
+  peer.on('open', () => { host.retries = 0; setNotice(''); showRelayState(); updateGuestCount(); });
   peer.on('connection', acceptGuest);
   peer.on('disconnected', () => {
     // Network changed or dropped: keep the same code and reconnect.
@@ -454,7 +552,7 @@ $('#copyBtn').onclick = () => {
 $('#newLinkBtn').onclick = () => {
   if (!confirm('Make a new code? Everyone connected now will be disconnected.')) return;
   host.code = newCode(); store.set('landrop-code', host.code);
-  host.peer?.destroy(); host.guests.clear();
+  host.peer?.destroy(); host.guests.clear(); updateGuestCount();
   showHostCode(); openHostPeer();
 };
 $('#stopBtn').onclick = async () => {
@@ -475,15 +573,33 @@ function scheduleGuestRetry(delay = 4000) {
   guest.retryTimer = setTimeout(connectToHost, delay);
 }
 
-function connectToHost() {
+async function connectToHost() {
   const peer = guest.peer;
   if (!peer || peer.destroyed) return;
   if (peer.disconnected) { peer.reconnect(); return; } // 'open' fires again and calls us back
+  // No relay yet (e.g. the Worker was unreachable): try again before each attempt.
+  if (RELAY_URL && !hasRelay()) peer.options.config = await loadIce();
   guest.conn?.close();
   const conn = guest.conn = peer.connect(PREFIX + guest.code, { serialization: 'raw', reliable: true });
-  const openTimeout = setTimeout(() => { if (!conn.open) { conn.close(); scheduleGuestRetry(1000); } }, 15000);
+  // The host was found but no network route worked (direct blocked, and no relay or relay failed).
+  const unreachable = () => {
+    if (conn.open || guest.conn !== conn) return;
+    clearTimeout(openTimeout);
+    setStatus("Can't reach the host · retrying…", false);
+    setNotice(hasRelay()
+      ? 'Found the host but could not connect, even through the relay. Check that both devices have internet access. This page keeps trying.'
+      : `Found the host, but this network blocks direct connections between devices and the relay is off${relayProblem ? ` (${relayProblem})` : ''}. Try a different network, for example a phone hotspot. This page keeps trying.`);
+    conn.close(); scheduleGuestRetry(5000);
+  };
+  const openTimeout = setTimeout(unreachable, 20000);
+  conn.peerConnection?.addEventListener('iceconnectionstatechange', () => {
+    if (conn.peerConnection.iceConnectionState === 'failed') unreachable();
+  });
 
-  conn.on('open', () => { clearTimeout(openTimeout); setStatus('Connected', true); setNotice(''); });
+  conn.on('open', () => {
+    clearTimeout(openTimeout); setStatus('Connected', true); setNotice('');
+    sendJSON(conn.dataChannel, { t: 'hello', device: deviceLabel(), ip: myPublicIp });
+  });
   conn.on('data', onGuestData);
   conn.on('close', () => {
     clearTimeout(openTimeout);
@@ -509,7 +625,7 @@ function onGuestData(d) {
   else p[m.t]?.(m);
 }
 
-function startGuest(code) {
+async function startGuest(code) {
   guest.code = code.toUpperCase();
   $('#title').textContent = 'Share ' + guest.code;
   setStatus('Connecting…', false);
@@ -574,7 +690,8 @@ function startGuest(code) {
   };
 
   showApp();
-  const peer = guest.peer = new Peer();
+  await iceReady;
+  const peer = guest.peer = new Peer({ config: iceConfig });
   peer.on('open', () => connectToHost());
   peer.on('disconnected', () => { setStatus('Offline · reconnecting…', false); scheduleGuestRetry(3000); });
   peer.on('error', e => {

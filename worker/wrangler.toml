@@ -1,0 +1,15 @@
+name = "lan-drop-turn"
+main = "index.js"
+compatibility_date = "2026-10-01"
+workers_dev = true
+
+[vars]
+ALLOWED_ORIGINS = "https://mikkaiser.github.io,http://127.0.0.1:5173,http://localhost:5173"
+ACCOUNT_ID = "1d7a03e70f5694e41fd9d82598e77b10"
+# Stop handing out relay credentials at this much TURN traffic (ingress + egress, last 31 days).
+# Cloudflare's free allowance is 1,000 GB/month; keep a safety margin.
+RELAY_LIMIT_GB = "900"
+
+# Secrets (set with `npx wrangler secret put NAME`):
+#   TURN_KEY_ID, TURN_KEY_API_TOKEN  - from Realtime > TURN Server
+#   ANALYTICS_API_TOKEN              - API token with "Account Analytics: Read"
