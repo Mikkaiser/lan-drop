@@ -1,0 +1,182 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>LAN Drop</title>
+<meta name="description" content="Share a folder from your computer with anyone who has the link. Files go device to device.">
+<style>
+  :root {
+    --bg: #f5f6f8; --card: #fff; --fg: #1b1f24; --muted: #6b7280; --line: #e3e5e9;
+    --accent: #2563eb; --accent-soft: #e0eaff; --danger: #dc2626; --ok: #16a34a; --warn: #b45309;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0f1115; --card: #171a20; --fg: #e6e8eb; --muted: #9aa1ab; --line: #2a2f38;
+      --accent: #6aa4ff; --accent-soft: #1b2638; --danger: #f87171; --ok: #4ade80; --warn: #fbbf24;
+    }
+  }
+  * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
+  body { margin: 0; font: 15px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; background: var(--bg); color: var(--fg); }
+  main { max-width: 860px; margin: 0 auto; padding: 28px 16px 64px; }
+  h1 { font-size: 22px; margin: 0; display: flex; align-items: center; gap: 10px; }
+  .muted { color: var(--muted); }
+  .btn { border: 1px solid var(--line); background: transparent; color: var(--fg); border-radius: 8px; padding: 6px 10px; font: inherit; font-size: 13px; cursor: pointer; text-decoration: none; white-space: nowrap; }
+  .btn:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+  .btn:disabled { opacity: .5; cursor: not-allowed; }
+  .btn.del:hover { border-color: var(--danger); color: var(--danger); }
+  .btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; padding: 10px 16px; font-size: 15px; font-weight: 600; }
+  .btn.primary:hover:not(:disabled) { color: #fff; filter: brightness(1.08); }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 20px; }
+
+  /* start screen */
+  #start { display: grid; gap: 16px; margin-top: 24px; }
+  #start h2 { font-size: 17px; margin: 0 0 6px; }
+  #start p { margin: 0 0 14px; }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  #code { background: var(--bg); color: var(--fg); border: 1px solid var(--line); border-radius: 8px; padding: 9px 12px; font: inherit; font-size: 16px;
+    letter-spacing: .15em; text-transform: uppercase; width: 160px; }
+  #code:focus { outline: none; border-color: var(--accent); }
+  .note { font-size: 13px; color: var(--warn); margin-top: 10px; }
+
+  /* app */
+  header { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-bottom: 18px; }
+  .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--muted); flex: none; }
+  .dot.on { background: var(--ok); }
+  #status { font-size: 13px; }
+
+  #hostPanel { display: flex; gap: 18px; align-items: center; margin-bottom: 16px; flex-wrap: wrap; }
+  #qr { width: 132px; height: 132px; border-radius: 10px; background: #fff; padding: 6px; flex: none; }
+  #qr img { width: 100%; height: 100%; image-rendering: pixelated; display: block; }
+  #hostPanel .info { flex: 1; min-width: 240px; display: grid; gap: 8px; }
+  .bigcode { font-size: 28px; font-weight: 700; letter-spacing: .18em; }
+  .link { font-size: 13px; word-break: break-all; }
+  .link a { color: var(--accent); }
+  .notice { border: 1px solid color-mix(in srgb, var(--danger) 45%, var(--line)); background: color-mix(in srgb, var(--danger) 8%, var(--card));
+    border-radius: 10px; padding: 10px 12px; font-size: 14px; margin-bottom: 14px; }
+
+  #drop { border: 2px dashed var(--line); border-radius: 14px; background: var(--card); padding: 36px 16px; text-align: center; cursor: pointer; transition: border-color .15s, background .15s; }
+  #drop:hover, #drop:focus-visible { border-color: var(--accent); background: var(--accent-soft); outline: none; }
+  #drop strong { display: block; font-size: 17px; margin-bottom: 4px; }
+  #drop span { color: var(--muted); font-size: 13px; }
+  #overlay { position: fixed; inset: 0; z-index: 10; display: none; align-items: center; justify-content: center;
+    background: color-mix(in srgb, var(--accent) 16%, transparent); border: 4px dashed var(--accent);
+    font-size: 24px; font-weight: 600; pointer-events: none; backdrop-filter: blur(2px); }
+  body.dragging #overlay { display: flex; }
+
+  #transfers { margin-top: 12px; display: grid; gap: 6px; }
+  #transfers:empty { display: none; }
+  .up { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 8px 12px; font-size: 13px; }
+  .up .line { display: flex; justify-content: space-between; gap: 12px; }
+  .up .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .up .pct { color: var(--muted); flex: none; }
+  .up.err .pct { color: var(--danger); }
+  .up.done .pct { color: var(--ok); }
+  .bar { height: 4px; background: var(--line); border-radius: 4px; margin-top: 6px; overflow: hidden; }
+  .bar i { display: block; height: 100%; width: 0; background: var(--accent); transition: width .1s; }
+  .up.err .bar i { background: var(--danger); width: 100%; }
+  .up.done .bar i { background: var(--ok); width: 100%; }
+
+  .toolbar { display: flex; justify-content: space-between; align-items: center; margin: 30px 0 10px; gap: 12px; flex-wrap: wrap; }
+  .toolbar h2 { font-size: 15px; margin: 0; }
+  #summary { color: var(--muted); font-size: 13px; font-weight: 400; margin-left: 6px; }
+  #search { background: var(--card); color: var(--fg); border: 1px solid var(--line); border-radius: 8px; padding: 7px 10px; font: inherit; font-size: 14px; width: 220px; max-width: 100%; }
+  #search:focus { outline: none; border-color: var(--accent); }
+
+  #files { list-style: none; margin: 0; padding: 0; background: var(--card); border: 1px solid var(--line); border-radius: 12px; overflow: hidden; }
+  #files li { display: flex; align-items: center; gap: 12px; padding: 10px 12px; border-top: 1px solid var(--line); }
+  #files li:first-child { border-top: 0; }
+  #files li.new { animation: flash 2s ease-out; }
+  @keyframes flash { from { background: var(--accent-soft); } }
+  .thumb { width: 42px; height: 42px; border-radius: 8px; background: var(--bg); flex: none; display: flex; align-items: center; justify-content: center;
+    font-size: 10px; font-weight: 700; color: var(--muted); text-transform: uppercase; letter-spacing: .02em; }
+  .meta { flex: 1; min-width: 0; }
+  .meta b { font-weight: 500; display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .meta small { color: var(--muted); }
+  .actions { display: flex; gap: 6px; flex: none; }
+  .empty { padding: 32px 16px !important; justify-content: center; color: var(--muted); }
+
+  #toast { position: fixed; left: 50%; bottom: 20px; transform: translateX(-50%) translateY(20px); background: var(--fg); color: var(--bg);
+    padding: 9px 14px; border-radius: 8px; font-size: 14px; opacity: 0; transition: .2s; pointer-events: none; max-width: calc(100% - 32px); z-index: 20; }
+  #toast.show { opacity: 1; transform: translateX(-50%); }
+
+  @media (max-width: 520px) {
+    #search { width: 100%; }
+    #qr { width: 110px; height: 110px; }
+  }
+</style>
+</head>
+<body>
+<div id="overlay">Drop to share</div>
+<main>
+  <!-- Start: choose to host a folder or join someone else's -->
+  <section id="startScreen">
+    <h1>LAN Drop</h1>
+    <p class="muted">Share a folder from your computer with anyone who has the link. Files go straight between devices; nothing is stored online.</p>
+    <div id="start">
+      <div class="card">
+        <h2>Share a folder from this computer</h2>
+        <p class="muted">Pick the folder to share. Other people can download its files and upload new ones into it while this tab stays open.</p>
+        <div class="row">
+          <button class="btn primary" id="pickBtn">Choose shared folder…</button>
+          <button class="btn" id="resumeBtn" hidden></button>
+        </div>
+        <div class="note" id="noPicker" hidden>Sharing a folder needs Chrome or Edge on a computer. You can still join a share below.</div>
+      </div>
+      <div class="card">
+        <h2>Join a share</h2>
+        <p class="muted">Enter the code shown on the host's screen, or just open the link they sent you.</p>
+        <form class="row" id="joinForm">
+          <input id="code" maxlength="6" autocomplete="off" spellcheck="false" placeholder="CODE" aria-label="Share code">
+          <button class="btn primary">Join</button>
+        </form>
+      </div>
+    </div>
+  </section>
+
+  <!-- App: same file view for host and guests -->
+  <section id="appScreen" hidden>
+    <header>
+      <h1><span class="dot" id="dot"></span><span id="title">LAN Drop</span></h1>
+      <span class="muted" id="status">Connecting…</span>
+    </header>
+
+    <div class="notice" id="notice" hidden></div>
+
+    <div class="card" id="hostPanel" hidden>
+      <div id="qr"></div>
+      <div class="info">
+        <div class="muted" style="font-size:13px">Share code</div>
+        <div class="bigcode" id="hostCode"></div>
+        <div class="link"><a id="hostLink" target="_blank"></a></div>
+        <div class="row">
+          <button class="btn" id="copyBtn">Copy link</button>
+          <button class="btn" id="newLinkBtn" title="Disconnects everyone and makes a new code">New code</button>
+          <button class="btn del" id="stopBtn">Stop sharing</button>
+        </div>
+        <div class="muted" style="font-size:13px">Keep this tab open. Closing it stops sharing.</div>
+      </div>
+    </div>
+
+    <div id="drop" tabindex="0" role="button">
+      <strong>Drop files anywhere on this page</strong>
+      <span>or click to choose · you can also paste (Ctrl+V)</span>
+      <input type="file" id="picker" multiple hidden>
+    </div>
+    <div id="transfers"></div>
+
+    <div class="toolbar">
+      <h2>Shared files<span id="summary"></span></h2>
+      <input id="search" type="search" placeholder="Filter files…">
+    </div>
+    <ul id="files"></ul>
+  </section>
+</main>
+<div id="toast"></div>
+
+<script src="https://cdn.jsdelivr.net/npm/peerjs@1.5.4/dist/peerjs.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/qrcode-generator@1.4.4/qrcode.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
