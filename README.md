@@ -23,7 +23,13 @@ npx wrangler secret put TURN_KEY_API_TOKEN
 npx wrangler secret put ANALYTICS_API_TOKEN  # API token with Account Analytics: Read
 ```
 
-Set `RELAY_URL` in `app.js` to the Worker's URL, and list the site's origin in `ALLOWED_ORIGINS` in `worker/wrangler.toml`.
+`relay-proxy/` is a Cloudflare Pages project (`lan-drop-relay.pages.dev`) that only forwards to that Worker through a service binding. Some networks can't reach the Cloudflare addresses `*.workers.dev` resolves to, while `*.pages.dev` uses others; the page tries both at once. Deploy it with `npx wrangler pages deploy --branch main` from `relay-proxy/`.
+
+List both URLs in `RELAY_URLS` in `app.js`, and the site's origin in `ALLOWED_ORIGINS` in `worker/wrangler.toml`.
+
+## Hosting again after closing the tab
+
+Reopen the site (or your own share link) in the same browser and click **Resume sharing** — the code stays the same, so links people already have keep working. If Chrome remembers the folder permission ("Allow on every visit"), sharing resumes on its own.
 
 ## Notes
 

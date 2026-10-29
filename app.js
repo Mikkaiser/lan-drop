@@ -5,7 +5,10 @@
 // (still end-to-end encrypted). worker/ hands out short-lived relay credentials.
 
 const $ = s => document.querySelector(s);
-const RELAY_URL = 'https://lan-drop-turn.mikkaiser-ribeiro.workers.dev'; // worker/; empty = direct connections only
+// Two addresses for the same relay Worker (worker/): some networks block the Cloudflare
+// addresses *.workers.dev resolves to, so relay-proxy/ forwards from *.pages.dev too.
+// Both are tried at once. Empty = direct connections only.
+const RELAY_URLS = ['https://lan-drop-relay.pages.dev', 'https://lan-drop-turn.mikkaiser-ribeiro.workers.dev'];
 const STUN = [{ urls: 'stun:stun.cloudflare.com:3478' }, { urls: 'stun:stun.l.google.com:19302' }];
 const ICE_REFRESH = 60 * 60 * 1000; // relay credentials last 3 h; refresh well before then
 const PREFIX = 'landrop-';            // keeps our ids apart from other apps on the public broker
@@ -100,16 +103,25 @@ async function sendBlob(dc, id, blob, isCancelled = () => false, onProgress = ()
 let iceConfig = { iceServers: STUN };
 let myPublicIp = '';   // reported by the Worker; sent to the host in 'hello'
 let relayProblem = ''; // why the relay is off, e.g. the monthly limit was reached
+
+async function fetchRelay(url) {
+  // Don't hang on an address this network can't reach.
+  const res = await fetch(url, { cache: 'no-store', signal: AbortSignal.timeout(8000) });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw Object.assign(new Error(data.error || `relay error ${res.status}`), { refused: true });
+  return data;
+}
+
 async function loadIce() {
-  if (!RELAY_URL) return iceConfig;
+  if (!RELAY_URLS.length) return iceConfig;
   try {
-    // Some networks can't reach every Cloudflare address, so don't hang on a dead one.
-    const res = await fetch(RELAY_URL, { cache: 'no-store', signal: AbortSignal.timeout(8000) });
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok) {
-      relayProblem = data.error || `relay error ${res.status}`;
-      iceConfig = { iceServers: STUN };
-      throw new Error(relayProblem);
+    let data;
+    try { data = await Promise.any(RELAY_URLS.map(fetchRelay)); }
+    catch (all) {
+      // The Worker answered but said no (e.g. monthly limit): stop using the relay.
+      const refused = all.errors.find(e => e.refused);
+      if (refused) { relayProblem = refused.message; iceConfig = { iceServers: STUN }; }
+      throw refused || all.errors[0];
     }
     relayProblem = '';
     if (data.ip) myPublicIp = data.ip;
@@ -129,12 +141,12 @@ const hasRelay = () => iceConfig.iceServers.some(s => [].concat(s.urls).some(u =
   setTimeout(() => loadIce().then(c => {
     for (const p of [host.peer, guest.peer]) if (p && !p.destroyed) p.options.config = c;
     if (host.peer) showRelayState();
-  }).finally(refreshIce), RELAY_URL && !hasRelay() ? 60 * 1000 : ICE_REFRESH);
+  }).finally(refreshIce), RELAY_URLS.length && !hasRelay() ? 60 * 1000 : ICE_REFRESH);
 })();
 
 // Host only: say when the relay is off, since then only devices that can connect directly get in.
 function showRelayState() {
-  if (RELAY_URL && relayProblem) setNotice(`Relay is off: ${relayProblem}. Only devices that can connect directly can join right now.`);
+  if (RELAY_URLS.length && relayProblem) setNotice(`Relay is off: ${relayProblem}. Only devices that can connect directly can join right now.`);
 }
 
 // Which address a connection actually uses (from the chosen ICE candidate pair).
@@ -308,7 +320,7 @@ function showApp() {
 // ---------- HOST: owns the folder, serves it to guests ----------
 
 // guests: conn -> { device, addr } for the "who's connected" list
-const host = { dir: null, code: null, peer: null, guests: new Map(), incoming: new Set(), key: '', scanning: false, retries: 0 };
+const host = { dir: null, code: null, peer: null, guests: new Map(), incoming: new Set(), key: '', scanning: false, retries: 0, gen: 0 };
 
 async function listDir() {
   const out = [];
@@ -481,7 +493,9 @@ function showHostCode() {
 }
 
 async function openHostPeer() {
+  const gen = ++host.gen; // a newer call (e.g. "New code") cancels pending retries of this one
   await iceReady;
+  if (gen !== host.gen) return;
   const peer = host.peer = new Peer(PREFIX + host.code, { config: iceConfig });
   setStatus('Connecting to the broker…', false);
   peer.on('open', () => { host.retries = 0; setNotice(''); showRelayState(); updateGuestCount(); });
@@ -493,10 +507,14 @@ async function openHostPeer() {
   });
   peer.on('error', e => {
     if (e.type === 'unavailable-id') {
-      // Usually our own previous session still being released; retry a few times before giving up the code.
+      // Usually our own previous tab: the broker can take up to a minute to release its code.
+      // Keep the same code (so links people already have keep working) and keep trying.
       peer.destroy();
-      if (++host.retries > 3) { host.code = newCode(); store.set('landrop-code', host.code); host.retries = 0; showHostCode(); toast('That code was taken, so you have a new one.'); }
-      setTimeout(openHostPeer, 3000);
+      setStatus(`Waiting for code ${host.code} to be released · retrying…`, false);
+      if (++host.retries === 3) {
+        setNotice(`Code ${host.code} is still held by an earlier session. A closed tab can take up to a minute to let go of it; if this share is also open in another tab or on another computer, close it there. LAN Drop keeps trying. Click "New code" to stop waiting and use a new code instead.`);
+      }
+      setTimeout(() => { if (gen === host.gen) openHostPeer(); }, 5000);
     } else if (['network', 'server-error', 'socket-error', 'socket-closed'].includes(e.type)) {
       setStatus('Offline · reconnecting…', false);
       setTimeout(() => { if (peer.destroyed) return; peer.disconnected ? peer.reconnect() : null; }, 5000);
@@ -553,6 +571,7 @@ $('#newLinkBtn').onclick = () => {
   if (!confirm('Make a new code? Everyone connected now will be disconnected.')) return;
   host.code = newCode(); store.set('landrop-code', host.code);
   host.peer?.destroy(); host.guests.clear(); updateGuestCount();
+  host.retries = 0; setNotice('');
   showHostCode(); openHostPeer();
 };
 $('#stopBtn').onclick = async () => {
@@ -578,7 +597,7 @@ async function connectToHost() {
   if (!peer || peer.destroyed) return;
   if (peer.disconnected) { peer.reconnect(); return; } // 'open' fires again and calls us back
   // No relay yet (e.g. the Worker was unreachable): try again before each attempt.
-  if (RELAY_URL && !hasRelay()) peer.options.config = await loadIce();
+  if (RELAY_URLS.length && !hasRelay()) peer.options.config = await loadIce();
   guest.conn?.close();
   const conn = guest.conn = peer.connect(PREFIX + guest.code, { serialization: 'raw', reliable: true });
   // The host was found but no network route worked (direct blocked, and no relay or relay failed).
@@ -721,18 +740,29 @@ async function pickFolder() {
 
 async function initStart() {
   const code = location.hash.slice(1).replace(/[^a-z0-9]/gi, '').toUpperCase();
-  if (code) return startGuest(code);
+  const myCode = store.get('landrop-code');
+  const saved = window.showDirectoryPicker ? await loadDirHandle() : null;
+  // Opening your own share link means "resume hosting", not "join it as a guest".
+  if (code && !(saved && code === myCode)) return startGuest(code);
+  if (code) history.replaceState(null, '', location.pathname);
 
   if (!window.showDirectoryPicker) {
     $('#pickBtn').disabled = true;
     $('#noPicker').hidden = false;
   } else {
     $('#pickBtn').onclick = pickFolder;
-    const saved = await loadDirHandle();
     if (saved) {
+      // If Chrome remembers the folder permission ("Allow on every visit"), resume right away.
+      if (await saved.queryPermission({ mode: 'readwrite' }).catch(() => 'denied') === 'granted') return startHosting(saved);
       const btn = $('#resumeBtn');
       btn.textContent = `Resume sharing "${saved.name}"`;
       btn.hidden = false;
+      // Make resuming the obvious next step.
+      btn.className = 'btn primary'; $('#pickBtn').className = 'btn';
+      $('#pickBtn').textContent = 'Choose a different folder…';
+      const note = $('#resumeNote');
+      note.textContent = `Your share${myCode ? ` (code ${myCode})` : ''} is offline until you click Resume sharing. People who have your link can't connect until then.`;
+      note.hidden = false;
       btn.onclick = async () => {
         try {
           const perm = await saved.queryPermission({ mode: 'readwrite' });
