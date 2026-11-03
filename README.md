@@ -27,9 +27,12 @@ npx wrangler deploy
 npx wrangler secret put TURN_KEY_ID          # Realtime > TURN Server
 npx wrangler secret put TURN_KEY_API_TOKEN
 npx wrangler secret put ANALYTICS_API_TOKEN  # API token with Account Analytics: Read
+npx wrangler secret put TURNSTILE_SECRET     # Turnstile widget's Secret Key (bot check)
 ```
 
-`relay-proxy/` is a Cloudflare Pages project (`lan-drop-relay.pages.dev`) that only forwards to that Worker through a service binding. Some networks can't reach the Cloudflare addresses `*.workers.dev` resolves to, while `*.pages.dev` uses others; the page tries both at once. Deploy it with `npx wrangler pages deploy --branch main` from `relay-proxy/`.
+The Worker is reachable at three addresses, all tried at once: `relay.mikkaiser.com` (custom domain), `lan-drop-relay.pages.dev` (`relay-proxy/`, a Pages project that only forwards to the Worker through a service binding) and `*.workers.dev`. Some networks block the Cloudflare addresses the last two resolve to; the custom domain gets addresses they can reach. Deploy the forwarder with `npx wrangler pages deploy --branch main` from `relay-proxy/`.
+
+**Bot check:** with `TURNSTILE_SECRET` set, the Worker only issues credentials to requests carrying a valid Cloudflare Turnstile token, so scripts can't take relay credentials just by faking the `Origin` header. The page gets tokens invisibly (a checkbox appears only if Turnstile insists). Embedded or automated browsers may fail the check; they then only get direct connections. To turn it off: `npx wrangler secret delete TURNSTILE_SECRET`.
 
 List both URLs in `RELAY_URLS` in `app.js`, and the site's origin in `ALLOWED_ORIGINS` in `worker/wrangler.toml`.
 
