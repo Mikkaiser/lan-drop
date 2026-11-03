@@ -2,6 +2,9 @@ name = "lan-drop-turn"
 main = "index.js"
 compatibility_date = "2026-10-01"
 workers_dev = true
+# Own subdomain: custom domains get Cloudflare addresses that networks blocking the
+# *.workers.dev / *.pages.dev ranges can still reach. Wrangler creates the DNS record.
+routes = [{ pattern = "relay.mikkaiser.com", custom_domain = true }]
 
 [vars]
 ALLOWED_ORIGINS = "https://mikkaiser.github.io,http://127.0.0.1:5173,http://localhost:5173"

@@ -5,10 +5,14 @@
 // (still end-to-end encrypted). worker/ hands out short-lived relay credentials.
 
 const $ = s => document.querySelector(s);
-// Two addresses for the same relay Worker (worker/): some networks block the Cloudflare
-// addresses *.workers.dev resolves to, so relay-proxy/ forwards from *.pages.dev too.
-// Both are tried at once. Empty = direct connections only.
-const RELAY_URLS = ['https://lan-drop-relay.pages.dev', 'https://lan-drop-turn.mikkaiser-ribeiro.workers.dev'];
+// Addresses for the same relay Worker (worker/), all tried at once. Some networks block the
+// Cloudflare addresses *.workers.dev and *.pages.dev (relay-proxy/) resolve to; the custom
+// domain gets addresses those networks can reach. Empty = direct connections only.
+const RELAY_URLS = [
+  'https://relay.mikkaiser.com',
+  'https://lan-drop-relay.pages.dev',
+  'https://lan-drop-turn.mikkaiser-ribeiro.workers.dev',
+];
 const STUN = [{ urls: 'stun:stun.cloudflare.com:3478' }, { urls: 'stun:stun.l.google.com:19302' }];
 const ICE_REFRESH = 60 * 60 * 1000; // relay credentials last 3 h; refresh well before then
 const PREFIX = 'landrop-';            // keeps our ids apart from other apps on the public broker
@@ -124,19 +128,53 @@ let iceConfig = { iceServers: STUN };
 let myPublicIp = '';   // reported by the Worker; sent to the host in 'hello'
 let relayProblem = ''; // why the relay is off, e.g. the monthly limit was reached
 
-async function fetchRelay(url) {
+async function fetchRelay(url, headers = {}) {
   // Don't hang on an address this network can't reach.
-  const res = await fetch(url, { cache: 'no-store', signal: AbortSignal.timeout(8000) });
+  const res = await fetch(url, { cache: 'no-store', headers, signal: AbortSignal.timeout(8000) });
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw Object.assign(new Error(data.error || `relay error ${res.status}`), { refused: true });
   return data;
 }
 
-async function loadIce() {
+// Bot check (Cloudflare Turnstile): the Worker only hands relay credentials to visitors of
+// this page, not to scripts. Normally invisible; a checkbox appears only if Turnstile insists.
+// Each token works once, so every loadIce() gets a fresh one. Empty key = no bot check.
+const TURNSTILE_SITE_KEY = '';
+let tsWidget = null, tsResolve = null;
+async function turnstileToken() {
+  if (!TURNSTILE_SITE_KEY) return '';
+  for (let i = 0; !window.turnstile && i < 50; i++) await new Promise(r => setTimeout(r, 200));
+  if (!window.turnstile) return ''; // script blocked: the Worker will refuse, direct connections still work
+  return new Promise(resolve => {
+    const timer = setTimeout(() => finish(''), 30000);
+    const finish = token => { clearTimeout(timer); tsResolve = null; resolve(token || ''); };
+    tsResolve = finish;
+    if (tsWidget === null) {
+      tsWidget = turnstile.render('#turnstile', {
+        sitekey: TURNSTILE_SITE_KEY, execution: 'execute', appearance: 'interaction-only',
+        callback: t => tsResolve?.(t),
+        'error-callback': () => { tsResolve?.(''); return true; },
+      });
+    } else {
+      turnstile.reset(tsWidget);
+    }
+    turnstile.execute(tsWidget);
+  });
+}
+
+// One fetch at a time (start-up, hourly refresh and guest retries can overlap),
+// since they share the Turnstile widget.
+let iceLoading = null;
+function loadIce() { return iceLoading ||= loadIceOnce().finally(() => { iceLoading = null; }); }
+
+async function loadIceOnce() {
   if (!RELAY_URLS.length) return iceConfig;
   try {
     let data;
-    try { data = await Promise.any(RELAY_URLS.map(fetchRelay)); }
+    const token = await turnstileToken();
+    // Same token and idempotency key to every address, so each can verify it.
+    const headers = token ? { 'X-Turnstile-Token': token, 'X-Turnstile-Key': crypto.randomUUID() } : {};
+    try { data = await Promise.any(RELAY_URLS.map(url => fetchRelay(url, headers))); }
     catch (all) {
       // The Worker answered but said no (e.g. monthly limit): stop using the relay.
       const refused = all.errors.find(e => e.refused);

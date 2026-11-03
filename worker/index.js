@@ -7,13 +7,34 @@
 // RELAY_LIMIT_GB is reached, so usage stays inside the free 1,000 GB/month.
 // If usage can't be read, it also refuses (fail closed).
 //
-// Secrets: TURN_KEY_ID, TURN_KEY_API_TOKEN, ANALYTICS_API_TOKEN (Account Analytics: Read)
+// Bot check: once TURNSTILE_SECRET is set, credentials go only to requests carrying a valid
+// Cloudflare Turnstile token from LAN Drop's page (the Origin header alone can be faked by
+// scripts). The page sends the same token to every relay address with one idempotency key,
+// so all of them can verify it.
+//
+// Secrets: TURN_KEY_ID, TURN_KEY_API_TOKEN, ANALYTICS_API_TOKEN (Account Analytics: Read),
+//          TURNSTILE_SECRET (optional until set)
 // Vars:    ACCOUNT_ID, RELAY_LIMIT_GB, ALLOWED_ORIGINS
 
 const TTL = 3 * 60 * 60;          // credentials last 3 hours, which bounds overshoot after the limit
 const USAGE_CACHE_MS = 5 * 60 * 1000;
 
 let usageCache = { gb: 0, at: 0 }; // per isolate (Cache API isn't available on workers.dev)
+
+async function turnstileOk(env, request) {
+  const token = request.headers.get('X-Turnstile-Token');
+  if (!token) return false;
+  const form = new FormData();
+  form.append('secret', env.TURNSTILE_SECRET);
+  form.append('response', token);
+  const ip = request.headers.get('CF-Connecting-IP');
+  if (ip) form.append('remoteip', ip);
+  const key = request.headers.get('X-Turnstile-Key');
+  if (key) form.append('idempotency_key', key);
+  const res = await fetch('https://challenges.cloudflare.com/turnstile/v0/siteverify', { method: 'POST', body: form });
+  const data = await res.json().catch(() => ({}));
+  return data.success === true;
+}
 
 async function relayUsageGB(env) {
   if (Date.now() - usageCache.at < USAGE_CACHE_MS) return usageCache.gb;
@@ -41,6 +62,7 @@ export default {
     const cors = {
       'Access-Control-Allow-Origin': allowed.includes(origin) ? origin : allowed[0] || '',
       'Access-Control-Allow-Methods': 'GET, OPTIONS',
+      'Access-Control-Allow-Headers': 'X-Turnstile-Token, X-Turnstile-Key',
       'Access-Control-Max-Age': '86400',
       Vary: 'Origin',
     };
@@ -52,6 +74,9 @@ export default {
     // Only LAN Drop's own pages may ask for credentials (stops other sites using our quota).
     if (!allowed.includes(origin)) return json(403, { error: 'Forbidden' });
     if (request.method !== 'GET') return json(405, { error: 'Method not allowed' });
+    if (env.TURNSTILE_SECRET && !(await turnstileOk(env, request).catch(() => false))) {
+      return json(403, { error: 'bot check failed, reload the page to try again' });
+    }
 
     const limitGB = Number(env.RELAY_LIMIT_GB) || 900;
     let usedGB;
