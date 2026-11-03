@@ -143,23 +143,28 @@ const TURNSTILE_SITE_KEY = '0x4AAAAAAFx1HtOZSw2llBgp'; // public by design (Turn
 let tsWidget = null, tsResolve = null;
 async function turnstileToken() {
   if (!TURNSTILE_SITE_KEY) return '';
-  for (let i = 0; !window.turnstile && i < 50; i++) await new Promise(r => setTimeout(r, 200));
-  if (!window.turnstile) return ''; // script blocked: the Worker will refuse, direct connections still work
+  // (Check for render(): a page element with id "turnstile" would also show up as window.turnstile.)
+  const ready = () => typeof window.turnstile?.render === 'function';
+  for (let i = 0; !ready() && i < 50; i++) await new Promise(r => setTimeout(r, 200));
+  if (!ready()) return ''; // script blocked: the Worker will refuse, direct connections still work
   return new Promise(resolve => {
     const timer = setTimeout(() => finish(''), 30000);
     const finish = token => { clearTimeout(timer); tsResolve = null; resolve(token || ''); };
     tsResolve = finish;
-    if (tsWidget === null) {
-      tsWidget = turnstile.render('#turnstile', {
-        sitekey: TURNSTILE_SITE_KEY, execution: 'execute', appearance: 'interaction-only',
-        callback: t => tsResolve?.(t),
-        'error-callback': () => { tsResolve?.(''); return true; },
-      });
-    } else {
-      turnstile.reset(tsWidget);
-    }
-    turnstile.execute(tsWidget);
+    try { runTurnstile(); } catch (e) { console.warn('turnstile failed', e); finish(''); }
   });
+}
+function runTurnstile() {
+  if (tsWidget === null) {
+    tsWidget = turnstile.render('#ts-box', {
+      sitekey: TURNSTILE_SITE_KEY, execution: 'execute', appearance: 'interaction-only',
+      callback: t => tsResolve?.(t),
+      'error-callback': () => { tsResolve?.(''); return true; },
+    });
+  } else {
+    turnstile.reset(tsWidget);
+  }
+  turnstile.execute(tsWidget);
 }
 
 // One fetch at a time (start-up, hourly refresh and guest retries can overlap),

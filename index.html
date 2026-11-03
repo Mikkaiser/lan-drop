@@ -106,7 +106,7 @@
   #toast { position: fixed; left: 50%; bottom: 20px; transform: translateX(-50%) translateY(20px); background: var(--fg); color: var(--bg);
     padding: 9px 14px; border-radius: 8px; font-size: 14px; opacity: 0; transition: .2s; pointer-events: none; max-width: calc(100% - 32px); z-index: 20; }
   #toast.show { opacity: 1; transform: translateX(-50%); }
-  #turnstile { position: fixed; right: 16px; bottom: 16px; z-index: 30; }
+  #ts-box { position: fixed; right: 16px; bottom: 16px; z-index: 30; }
 
   @media (max-width: 520px) {
     #search { width: 100%; }
@@ -186,7 +186,7 @@
 </main>
 <div id="toast"></div>
 <!-- Turnstile bot check for relay credentials; only visible if it needs a click. -->
-<div id="turnstile"></div>
+<div id="ts-box"></div>
 <script src="https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit" async defer></script>
 
 <script src="https://cdn.jsdelivr.net/npm/peerjs@1.5.4/dist/peerjs.min.js"></script>
