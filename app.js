@@ -139,7 +139,7 @@ async function fetchRelay(url, headers = {}) {
 // Bot check (Cloudflare Turnstile): the Worker only hands relay credentials to visitors of
 // this page, not to scripts. Normally invisible; a checkbox appears only if Turnstile insists.
 // Each token works once, so every loadIce() gets a fresh one. Empty key = no bot check.
-const TURNSTILE_SITE_KEY = '';
+const TURNSTILE_SITE_KEY = '0x4AAAAAAFx1HtOZSw2llBgp'; // public by design (Turnstile widget "LAN Drop")
 let tsWidget = null, tsResolve = null;
 async function turnstileToken() {
   if (!TURNSTILE_SITE_KEY) return '';
