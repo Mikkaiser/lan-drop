@@ -37,10 +37,13 @@ function ago(t) {
   return new Date(t).toLocaleDateString();
 }
 let toastTimer;
-function toast(msg) {
+// ms = 0 keeps the message up until toastHide().
+function toast(msg, ms = 2800) {
   const t = $('#toast'); t.textContent = msg; t.classList.add('show');
-  clearTimeout(toastTimer); toastTimer = setTimeout(() => t.classList.remove('show'), 2800);
+  clearTimeout(toastTimer);
+  if (ms) toastTimer = setTimeout(() => t.classList.remove('show'), ms);
 }
+function toastHide() { clearTimeout(toastTimer); $('#toast').classList.remove('show'); }
 function el(tag, props = {}, ...kids) {
   const e = Object.assign(document.createElement(tag), props);
   e.append(...kids); return e;
@@ -140,7 +143,7 @@ async function fetchRelay(url, headers = {}) {
 // this page, not to scripts. Normally invisible; a checkbox appears only if Turnstile insists.
 // Each token works once, so every loadIce() gets a fresh one. Empty key = no bot check.
 const TURNSTILE_SITE_KEY = '0x4AAAAAAFx1HtOZSw2llBgp'; // public by design (Turnstile widget "LAN Drop")
-let tsWidget = null, tsResolve = null;
+let tsWidget = null, tsResolve = null, tsTimer = null;
 async function turnstileToken() {
   if (!TURNSTILE_SITE_KEY) return '';
   // (Check for render(): a page element with id "turnstile" would also show up as window.turnstile.)
@@ -148,8 +151,8 @@ async function turnstileToken() {
   for (let i = 0; !ready() && i < 50; i++) await new Promise(r => setTimeout(r, 200));
   if (!ready()) return ''; // script blocked: the Worker will refuse, direct connections still work
   return new Promise(resolve => {
-    const timer = setTimeout(() => finish(''), 30000);
-    const finish = token => { clearTimeout(timer); tsResolve = null; resolve(token || ''); };
+    const finish = token => { clearTimeout(tsTimer); tsResolve = null; resolve(token || ''); };
+    tsTimer = setTimeout(() => finish(''), 30000);
     tsResolve = finish;
     try { runTurnstile(); } catch (e) { console.warn('turnstile failed', e); finish(''); }
   });
@@ -158,8 +161,13 @@ function runTurnstile() {
   if (tsWidget === null) {
     tsWidget = turnstile.render('#ts-box', {
       sitekey: TURNSTILE_SITE_KEY, execution: 'execute', appearance: 'interaction-only',
-      callback: t => tsResolve?.(t),
+      callback: t => { toastHide(); tsResolve?.(t); },
       'error-callback': () => { tsResolve?.(''); return true; },
+      // Turnstile wants a click: wait for the person (no time limit) and tell them where.
+      'before-interactive-callback': () => {
+        clearTimeout(tsTimer);
+        toast('Tick the box at the bottom right to enable the relay.', 0);
+      },
     });
   } else {
     turnstile.reset(tsWidget);
