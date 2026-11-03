@@ -71,6 +71,26 @@ function frame(id, bytes) {
 }
 function unframe(buf) { return [new DataView(buf).getUint32(0), new Uint8Array(buf, 4)]; }
 
+// Protocol v2 (striped transfers): one WebRTC connection only keeps so much data in flight,
+// which caps its speed on long or lossy routes such as the relay. v2 hosts let a guest open
+// LANES connections; each transfer is split into SEG-sized segments spread across them.
+// v2 binary frames: [id | V2 (u32)][byte offset (f64)][bytes]. The high bit keeps them apart
+// from v1 frames, which older cached pages still send.
+const PROTOCOL = 2;
+const LANES = 4;
+const SEG = 4 * 1024 * 1024;
+const V2 = 0x80000000;
+function frame2(id, offset, bytes) {
+  const out = new Uint8Array(12 + bytes.byteLength);
+  const v = new DataView(out.buffer);
+  v.setUint32(0, (id | V2) >>> 0);
+  v.setFloat64(4, offset);
+  out.set(bytes, 12);
+  return out.buffer;
+}
+function unframe2(buf) { const v = new DataView(buf); return [v.getUint32(0) & 0x7fffffff, v.getFloat64(4), new Uint8Array(buf, 12)]; }
+const isFrame2 = buf => buf.byteLength >= 12 && new DataView(buf).getUint32(0) >= V2;
+
 function sendJSON(dc, msg) { if (dc && dc.readyState === 'open') dc.send(JSON.stringify(msg)); }
 
 // Wait until the channel has room, so big files don't pile up in memory.
@@ -173,6 +193,20 @@ function deviceLabel() {
   return `${os} · ${browser}`;
 }
 
+// Send [start, end) of a Blob/File as v2 frames; onProgress(bytes) per block. False if stopped.
+async function sendRange(dc, id, blob, start, end, isCancelled = () => false, onProgress = () => {}) {
+  for (let off = start; off < end; off += BLOCK) {
+    const bytes = new Uint8Array(await blob.slice(off, Math.min(off + BLOCK, end)).arrayBuffer());
+    for (let i = 0; i < bytes.length; i += CHUNK) {
+      await drain(dc);
+      if (dc.readyState !== 'open' || isCancelled()) return false;
+      dc.send(frame2(id, off + i, bytes.subarray(i, i + CHUNK)));
+    }
+    onProgress(bytes.length);
+  }
+  return true;
+}
+
 // Tiny IndexedDB key-value store, used to remember the host's folder between visits.
 function idb(mode, fn) {
   return new Promise((resolve, reject) => {
@@ -247,15 +281,23 @@ function transferRow(label, size) {
     el('div', { className: 'line' }, el('span', { className: 'name', textContent: `${label} (${fmtSize(size)})` }), pct),
     el('div', { className: 'bar' }, bar));
   $('#transfers').append(row);
-  let finished = false;
+  let finished = false, started = 0, last = 0;
   return {
     progress(bytes) {
+      const now = performance.now();
+      if (!started) started = now;
       const p = size ? Math.min(100, Math.round(bytes / size * 100)) : 100;
-      bar.style.width = p + '%'; pct.textContent = p + '%';
+      bar.style.width = p + '%';
+      last = bytes;
+      const secs = (now - started) / 1000;
+      // Average speed so far, so people can see what their route actually manages.
+      pct.textContent = secs > 1 ? `${p}% · ${fmtSize(Math.round(bytes / secs))}/s` : p + '%';
     },
     note(text) { pct.textContent = text; },
     done(text = 'done') {
       if (finished) return; finished = true;
+      const secs = started ? (performance.now() - started) / 1000 : 0;
+      if (secs > 1 && text === 'done') text = `done · ${fmtSize(Math.round(last / secs))}/s`;
       row.classList.add('done'); pct.textContent = text; setTimeout(() => row.remove(), 1500);
     },
     fail(msg) {
@@ -320,7 +362,8 @@ function showApp() {
 // ---------- HOST: owns the folder, serves it to guests ----------
 
 // guests: conn -> { device, addr } for the "who's connected" list
-const host = { dir: null, code: null, peer: null, guests: new Map(), incoming: new Set(), key: '', scanning: false, retries: 0, gen: 0 };
+// puts2: `${guest peer id}:${transfer id}` -> v2 upload being written (fed by all of that guest's lanes)
+const host = { dir: null, code: null, peer: null, guests: new Map(), puts2: new Map(), incoming: new Set(), key: '', scanning: false, retries: 0, gen: 0 };
 
 async function listDir() {
   const out = [];
@@ -341,7 +384,7 @@ async function rescan() {
     if (key !== host.key) {
       host.key = key;
       setFiles(list);
-      for (const c of host.guests.keys()) sendJSON(c.dataChannel, { t: 'files', files: list });
+      for (const c of host.guests.keys()) sendJSON(c.dataChannel, { t: 'files', files: list, v: PROTOCOL });
     }
   } catch (e) {
     setNotice('Lost access to the folder (' + e.message + '). Click "Stop sharing" and choose it again.');
@@ -385,14 +428,46 @@ async function openIncoming(rawName) {
 
 function hostKnows(name) { try { return JSON.parse(host.key).some(f => f.name === name); } catch { return false; } }
 
+// v2 uploads: segments arrive on any of the guest's lanes and are written at their offsets.
+function receivePut2(conn, buf) {
+  const [id, off, bytes] = unframe2(buf);
+  const p = host.puts2.get(`${conn.peer}:${id}`);
+  if (!p) return;
+  const idx = Math.floor(off / p.seg);
+  if (p.done.has(idx)) return;
+  let s = p.segs.get(idx);
+  if (!s || s.conn !== conn) p.segs.set(idx, s = { got: 0, conn }); // re-sent on another lane: count afresh
+  s.got += bytes.byteLength;
+  p.queue = p.queue.then(() => p.inc.writable.write({ type: 'write', position: off, data: bytes }));
+  if (s.got >= Math.min(p.seg, p.size - idx * p.seg)) {
+    p.done.add(idx); p.segs.delete(idx);
+    sendJSON(conn.dataChannel, { t: 'ack', id, seg: idx });
+    if (p.done.size === p.nsegs) finishPut2(p);
+  }
+}
+function finishPut2(p) {
+  host.puts2.delete(p.key);
+  p.queue
+    .then(() => p.inc.finish(true))
+    .then(() => sendJSON(p.control.dataChannel, { t: 'saved', id: p.id, name: p.inc.name }),
+          e => { p.inc.finish(false).catch(() => {}); sendJSON(p.control.dataChannel, { t: 'err', id: p.id, msg: e.message }); });
+}
+function abortPut2(p) {
+  host.puts2.delete(p.key);
+  p.queue.finally(() => p.inc.finish(false)).catch(() => {});
+}
+
 function acceptGuest(conn) {
   const gets = new Map(), puts = new Map();
+  const ranges = new Map();                         // v2 downloads: `${id}:${start}` -> cancel
+  const isLane = conn.metadata?.role === 'lane';    // extra connection of a guest already listed
 
   conn.on('open', () => {
+    if (isLane) return;
     const info = { device: 'Connecting device', addr: null };
     host.guests.set(conn, info);
     updateGuestCount();
-    sendJSON(conn.dataChannel, { t: 'files', files });
+    sendJSON(conn.dataChannel, { t: 'files', files, v: PROTOCOL });
     // The chosen route can change in the first seconds, so look twice.
     const lookup = () => remoteAddress(conn).then(a => { if (a && host.guests.has(conn)) { info.addr = a; updateGuestCount(); } }).catch(() => {});
     lookup(); setTimeout(lookup, 3000);
@@ -401,6 +476,7 @@ function acceptGuest(conn) {
   conn.on('data', async d => {
     const dc = conn.dataChannel;
     if (typeof d !== 'string') {
+      if (isFrame2(d)) return receivePut2(conn, d);
       const [id, bytes] = unframe(d);
       const p = puts.get(id); if (!p) return;
       p.got += bytes.byteLength;
@@ -435,13 +511,42 @@ function acceptGuest(conn) {
         if (p.size === 0) finishPut(m.id, p);
         else sendJSON(dc, { t: 'ready', id: m.id });
       } catch (e) { sendJSON(dc, { t: 'err', id: m.id, msg: e.message }); }
+    } else if (m.t === 'stat') {
+      try {
+        if (!hostKnows(m.name)) throw new Error('file not found');
+        const file = await (await host.dir.getFileHandle(m.name)).getFile();
+        sendJSON(dc, { t: 'meta', id: m.id, size: file.size });
+      } catch (e) { sendJSON(dc, { t: 'err', id: m.id, msg: e.message }); }
+    } else if (m.t === 'range') {
+      const key = `${m.id}:${m.start}`;
+      let cancelled = false;
+      ranges.set(key, () => { cancelled = true; });
+      try {
+        if (!hostKnows(m.name)) throw new Error('file not found');
+        const file = await (await host.dir.getFileHandle(m.name)).getFile();
+        await sendRange(dc, m.id, file, m.start, Math.min(m.end, file.size), () => cancelled);
+      } catch (e) { sendJSON(dc, { t: 'err', id: m.id, msg: e.message }); }
+      finally { ranges.delete(key); }
+    } else if (m.t === 'put2') {
+      try {
+        const inc = await openIncoming(m.name);
+        const size = Number(m.size) || 0, seg = Number(m.seg) || SEG;
+        const p = { key: `${conn.peer}:${m.id}`, id: m.id, guest: conn.peer, control: conn, inc, size, seg,
+                    nsegs: Math.ceil(size / seg), segs: new Map(), done: new Set(), queue: Promise.resolve() };
+        host.puts2.set(p.key, p);
+        if (!p.nsegs) finishPut2(p);
+        else sendJSON(dc, { t: 'ready', id: m.id });
+      } catch (e) { sendJSON(dc, { t: 'err', id: m.id, msg: e.message }); }
     } else if (m.t === 'del') {
       if (hostKnows(m.name)) await host.dir.removeEntry(m.name).catch(() => {});
       rescan();
     } else if (m.t === 'cancel') {
       gets.get(m.id)?.();
+      for (const [key, cancel] of ranges) if (key.startsWith(m.id + ':')) cancel();
       const p = puts.get(m.id);
       if (p) { puts.delete(m.id); p.queue.finally(() => p.inc.finish(false)); }
+      const p2 = host.puts2.get(`${conn.peer}:${m.id}`);
+      if (p2) abortPut2(p2);
     }
   });
 
@@ -454,10 +559,13 @@ function acceptGuest(conn) {
   }
 
   conn.on('close', () => {
-    host.guests.delete(conn);
     for (const cancel of gets.values()) cancel();
+    for (const cancel of ranges.values()) cancel();
     for (const p of puts.values()) p.queue.finally(() => p.inc.finish(false));
     puts.clear();
+    if (isLane) return; // the guest re-sends that lane's segments on its other connections
+    host.guests.delete(conn);
+    for (const p of [...host.puts2.values()]) if (p.control === conn) abortPut2(p);
     updateGuestCount();
   });
 }
@@ -581,11 +689,144 @@ $('#stopBtn').onclick = async () => {
   location.hash = ''; location.reload();
 };
 
-// ---------- GUEST: talks to the host over one data connection ----------
+// ---------- GUEST: a control connection plus extra lanes for speed (protocol v2) ----------
 
-const guest = { code: null, peer: null, conn: null, nextId: 1, pending: new Map(), retryTimer: null };
+// conn: control connection (file list, requests). lanes: extra connections for v2 transfers.
+// transfers: v2 transfers in progress, told when lanes come and go.
+const guest = { code: null, peer: null, conn: null, lanes: new Set(), hostV: 0, nextId: 1,
+                pending: new Map(), transfers: new Set(), retryTimer: null };
 
 function guestDC() { const dc = guest.conn?.dataChannel; return dc && dc.readyState === 'open' ? dc : null; }
+function guestLanes() { return [guest.conn, ...guest.lanes].filter(c => c?.dataChannel?.readyState === 'open'); }
+
+function openLane() {
+  const peer = guest.peer, control = guest.conn;
+  if (!peer || peer.destroyed || peer.disconnected || !control?.open) return;
+  const lane = peer.connect(PREFIX + guest.code, { serialization: 'raw', reliable: true, metadata: { role: 'lane' } });
+  lane.on('open', () => {
+    if (guest.conn !== control) return lane.close();
+    guest.lanes.add(lane);
+    for (const t of guest.transfers) t.pump();
+  });
+  lane.on('data', d => onGuestData(d, lane));
+  lane.on('close', () => {
+    if (!guest.lanes.delete(lane)) return;
+    for (const t of guest.transfers) t.laneLost(lane);
+    setTimeout(() => { if (guest.conn === control && control.open && guest.lanes.size < LANES - 1) openLane(); }, 3000);
+  });
+  lane.on('error', () => {});
+}
+
+// Hands segments of [0, size) to open lanes, keeping up to `slots` in flight per lane.
+// start(idx, lane, from, to) begins one; finishSeg(idx) when it's complete (true when all are);
+// laneLost(lane) puts that lane's unfinished segments back in the queue for the others.
+function stripe(size, slots, start) {
+  const n = Math.ceil(size / SEG), queue = [...Array(n).keys()], inflight = new Map(), load = new Map();
+  let done = 0;
+  const s = {
+    segLen: idx => Math.min(SEG, size - idx * SEG),
+    owner: idx => inflight.get(idx),
+    pump() {
+      for (const lane of guestLanes()) {
+        while ((load.get(lane) || 0) < slots && queue.length) {
+          const idx = queue.shift();
+          inflight.set(idx, { lane, got: 0 });
+          load.set(lane, (load.get(lane) || 0) + 1);
+          start(idx, lane, idx * SEG, idx * SEG + s.segLen(idx));
+        }
+      }
+    },
+    finishSeg(idx) {
+      const f = inflight.get(idx);
+      if (!f) return false;
+      inflight.delete(idx); load.set(f.lane, load.get(f.lane) - 1); done++;
+      if (done < n) s.pump();
+      return done === n;
+    },
+    laneLost(lane) {
+      for (const [idx, f] of inflight) if (f.lane === lane) { inflight.delete(idx); queue.unshift(idx); }
+      load.delete(lane);
+      s.pump();
+    },
+  };
+  return s;
+}
+
+function download2(f, ui, sink) {
+  return new Promise(resolve => {
+    const id = guest.nextId++;
+    let got = 0, writes = Promise.resolve(), st = null;
+    const t = {
+      meta(m) {
+        if (!m.size) return t.complete();
+        st = stripe(m.size, 2, (idx, lane, from, to) => sendJSON(lane.dataChannel, { t: 'range', id, name: f.name, start: from, end: to }));
+        ui.progress(0); st.pump();
+      },
+      chunk2(off, bytes, lane) {
+        const idx = Math.floor(off / SEG), o = st?.owner(idx);
+        if (!o || o.lane !== lane) return; // late data from a segment that moved lanes
+        o.got += bytes.byteLength; got += bytes.byteLength; ui.progress(got);
+        writes = writes.then(() => sink.write(off, bytes));
+        if (o.got >= st.segLen(idx) && st.finishSeg(idx)) t.complete();
+      },
+      pump() { st?.pump(); },
+      laneLost(lane) { st?.laneLost(lane); },
+      complete() { cleanup(); writes.then(() => sink.close()).then(() => ui.done(), e => ui.fail(e.message)).finally(resolve); },
+      err(msg) { cleanup(); writes.finally(() => sink.abort()); ui.fail(msg); resolve(); },
+    };
+    const cleanup = () => { guest.pending.delete(id); guest.transfers.delete(t); };
+    guest.pending.set(id, t); guest.transfers.add(t);
+    ui.note('starting…');
+    sendJSON(guestDC(), { t: 'stat', id, name: f.name });
+  });
+}
+
+function upload2(file, ui) {
+  return new Promise(resolve => {
+    const id = guest.nextId++;
+    let sent = 0, st = null;
+    const t = {
+      ready() {
+        // Each slot sends a segment, then waits for the host's 'ack' before taking another.
+        st = stripe(file.size, 2, (idx, lane, from, to) => sendRange(lane.dataChannel, id, file, from, to,
+          () => !guest.pending.has(id) || st.owner(idx)?.lane !== lane,
+          b => { sent += b; ui.progress(Math.min(sent, file.size)); }));
+        st.pump();
+      },
+      ack(m, lane) {
+        const o = st?.owner(m.seg);
+        if (o && o.lane === lane && st.finishSeg(m.seg)) ui.note('saving…');
+      },
+      pump() { st?.pump(); },
+      laneLost(lane) { st?.laneLost(lane); },
+      saved(m) { cleanup(); ui.done(m.name === file.name ? 'done' : 'saved as ' + m.name); resolve(); },
+      err(msg) { cleanup(); ui.fail(msg); resolve(); },
+    };
+    const cleanup = () => { guest.pending.delete(id); guest.transfers.delete(t); };
+    const dc = guestDC();
+    if (!dc) { ui.fail('not connected'); return resolve(); }
+    guest.pending.set(id, t); guest.transfers.add(t);
+    sendJSON(dc, { t: 'put2', id, name: file.name, size: file.size, seg: SEG });
+  });
+}
+
+// Where downloads go: straight to disk for big files on desktop Chrome/Edge, else memory.
+// Returns null if the person cancelled the save dialog.
+async function downloadSink(f) {
+  if (f.size > BIG_DOWNLOAD && window.showSaveFilePicker) {
+    try {
+      const w = await (await showSaveFilePicker({ suggestedName: f.name })).createWritable();
+      return { write: (off, b) => w.write({ type: 'write', position: off, data: b }), close: () => w.close(), abort: () => w.abort() };
+    } catch (e) { if (e.name === 'AbortError') return null; }
+  }
+  // Keyed by offset: a segment re-sent on another lane replaces what the lost lane delivered.
+  const parts = new Map();
+  return {
+    write: (off, b) => { parts.set(off, b); },
+    close: () => saveBlob(new Blob([...parts.keys()].sort((a, b) => a - b).map(k => parts.get(k))), f.name),
+    abort: () => { parts.clear(); },
+  };
+}
 
 function scheduleGuestRetry(delay = 4000) {
   clearTimeout(guest.retryTimer);
@@ -599,6 +840,8 @@ async function connectToHost() {
   // No relay yet (e.g. the Worker was unreachable): try again before each attempt.
   if (RELAY_URLS.length && !hasRelay()) peer.options.config = await loadIce();
   guest.conn?.close();
+  for (const lane of guest.lanes) lane.close();
+  guest.lanes.clear(); guest.hostV = 0;
   const conn = guest.conn = peer.connect(PREFIX + guest.code, { serialization: 'raw', reliable: true });
   // The host was found but no network route worked (direct blocked, and no relay or relay failed).
   const unreachable = () => {
@@ -619,29 +862,43 @@ async function connectToHost() {
     clearTimeout(openTimeout); setStatus('Connected', true); setNotice('');
     sendJSON(conn.dataChannel, { t: 'hello', device: deviceLabel(), ip: myPublicIp });
   });
-  conn.on('data', onGuestData);
+  conn.on('data', d => onGuestData(d, conn));
   conn.on('close', () => {
     clearTimeout(openTimeout);
     if (guest.conn !== conn) return;
     setStatus('Lost connection · retrying…', false);
-    for (const p of guest.pending.values()) p.err('connection lost');
-    guest.pending.clear();
+    for (const lane of guest.lanes) lane.close();
+    guest.lanes.clear();
+    for (const p of [...guest.pending.values()]) p.err('connection lost');
+    guest.pending.clear(); guest.transfers.clear();
     scheduleGuestRetry();
   });
   conn.on('error', () => {});
 }
 
-function onGuestData(d) {
+function onGuestData(d, conn) {
   if (typeof d !== 'string') {
-    const [id, bytes] = unframe(d);
-    guest.pending.get(id)?.chunk(bytes);
+    if (isFrame2(d)) {
+      const [id, off, bytes] = unframe2(d);
+      guest.pending.get(id)?.chunk2?.(off, bytes, conn);
+    } else {
+      const [id, bytes] = unframe(d);
+      guest.pending.get(id)?.chunk?.(bytes);
+    }
     return;
   }
   let m; try { m = JSON.parse(d); } catch { return; }
-  if (m.t === 'files') return setFiles(m.files);
+  if (m.t === 'files') {
+    // A v2 host: open the extra lanes once per control connection.
+    if (conn === guest.conn && m.v >= 2 && !guest.hostV) {
+      guest.hostV = m.v;
+      for (let i = 1; i < LANES; i++) openLane();
+    }
+    return setFiles(m.files);
+  }
   const p = guest.pending.get(m.id); if (!p) return;
   if (m.t === 'err') p.err(m.msg);
-  else p[m.t]?.(m);
+  else p[m.t]?.(m, conn);
 }
 
 async function startGuest(code) {
@@ -652,6 +909,8 @@ async function startGuest(code) {
   backend = {
     openLabel: 'Download',
     upload(file, ui) {
+      if (guest.hostV >= 2) return upload2(file, ui);
+      // v1 host (older cached page): one stream on the control connection.
       return new Promise(resolve => {
         const dc = guestDC();
         if (!dc) { ui.fail('not connected'); return resolve(); }
@@ -670,26 +929,20 @@ async function startGuest(code) {
     },
     async open(f, ui) {
       if (!guestDC()) return ui.fail('not connected');
-      // Big files on desktop Chrome/Edge: stream straight to disk. Otherwise collect in memory.
-      let sink = null;
-      if (f.size > BIG_DOWNLOAD && window.showSaveFilePicker) {
-        try {
-          const w = await (await showSaveFilePicker({ suggestedName: f.name })).createWritable();
-          sink = { write: b => w.write(b), close: () => w.close(), abort: () => w.abort() };
-        } catch (e) { if (e.name === 'AbortError') return ui.fail('cancelled'); }
-      }
-      if (!sink) {
-        const parts = [];
-        sink = { write: b => { parts.push(b); }, close: () => saveBlob(new Blob(parts), f.name), abort: () => { parts.length = 0; } };
-      }
+      const sink = await downloadSink(f);
+      if (!sink) return ui.fail('cancelled');
+      if (guest.hostV >= 2) return download2(f, ui, sink);
+      // v1 host (older cached page): one in-order stream on the control connection.
+      let pos = 0;
       const dc = guestDC(); if (!dc) return ui.fail('not connected');
       const id = guest.nextId++;
       let size = f.size, got = 0, writes = Promise.resolve();
       guest.pending.set(id, {
         meta(m) { size = m.size; },
         chunk(bytes) {
+          const off = pos; pos += bytes.byteLength;
           got += bytes.byteLength;
-          writes = writes.then(() => sink.write(bytes));
+          writes = writes.then(() => sink.write(off, bytes));
           ui.progress(got);
         },
         end() {

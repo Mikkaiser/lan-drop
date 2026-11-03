@@ -11,6 +11,12 @@ When a network blocks direct connections between devices (common on staff/guest 
 
 The share code stays the same when the host reloads or switches networks, and guests reconnect on their own. The host sees who is connected (device, and public IP — browsers hide local network IPs).
 
+## Speed
+
+A single WebRTC connection only keeps a limited amount of data in flight, which caps its speed on long or lossy routes (like the relay). Each guest therefore opens 4 connections to the host and transfers are split into 4 MB segments spread across them (protocol v2); if one connection drops, its segments move to the others. Hosts and guests on older cached pages fall back to a single connection. Every transfer shows its average speed.
+
+Across different networks, speed can't exceed the sender's upload or the receiver's download.
+
 ## Relay (worker/)
 
 `worker/` is a Cloudflare Worker that hands browsers short-lived TURN credentials, so the TURN key never appears in this public page. It also guards spending: it reads the account's TURN usage and stops issuing credentials at `RELAY_LIMIT_GB` (900 GB, ingress + egress, last 31 days), below Cloudflare's free 1,000 GB/month. If usage can't be read, it refuses (fail closed) and LAN Drop falls back to direct connections only.
