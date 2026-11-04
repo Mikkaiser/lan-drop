@@ -1085,5 +1085,26 @@ async function initStart() {
   };
 }
 
+// ---------- "How LAN Drop works" video (footer) ----------
+
+// The 50 s video is only downloaded when someone opens it.
+const VIDEO_SRC = 'how-lan-drop-works.mp4';
+function openHowVideo() {
+  const video = $('#howVideo');
+  if (!video.src) video.src = VIDEO_SRC;
+  $('#howModal').hidden = false;
+  $('#howClose').focus();
+  video.play().catch(() => {}); // autoplay with sound may be refused; the controls are there
+}
+function closeHowVideo() {
+  $('#howVideo').pause();
+  $('#howModal').hidden = true;
+  $('#howBtn').focus();
+}
+$('#howBtn').onclick = openHowVideo;
+$('#howClose').onclick = closeHowVideo;
+$('#howModal').addEventListener('click', e => { if (e.target === $('#howModal')) closeHowVideo(); });
+addEventListener('keydown', e => { if (e.key === 'Escape' && !$('#howModal').hidden) closeHowVideo(); });
+
 addEventListener('hashchange', () => location.reload());
 initStart();

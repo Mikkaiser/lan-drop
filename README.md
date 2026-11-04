@@ -4,6 +4,12 @@ Share a folder from your computer with anyone who has the link, right from the b
 
 **Live:** https://mikkaiser.github.io/lan-drop/
 
+## How it works in 50 seconds
+
+[![How LAN Drop works: watch the 50-second video](how-lan-drop-works.jpg)](https://mikkaiser.github.io/lan-drop/how-lan-drop-works.mp4)
+
+*Click the image to play the video.* It's also on the site: **How LAN Drop works**, in the footer.
+
 ## Using it
 
 - **Host:** open the site in Chrome or Edge on a computer, click **Choose shared folder…** and allow editing. Share the 6-letter code, the link or the QR code. Keep the tab open while sharing.
@@ -79,8 +85,17 @@ Secrets live only in Cloudflare; none are in this repository.
 | Path | What it is |
 |---|---|
 | `index.html`, `app.js` | The whole site: UI, host and guest logic, transfer protocol |
+| `how-lan-drop-works.mp4`, `.jpg` | The 50 s explainer video (1080p, 1.8 MB) and its poster; the footer link loads the video only when opened |
+| `fonts/` | Barlow and IBM Plex Mono, self-hosted |
+| `favicon.svg`, `favicon-*.png` | Site icon: an arrow dropping into a tray |
 | `worker/` | Relay Worker: credentials, bot check, spending guard |
 | `relay-proxy/` | Pages forwarder giving the Worker a second address |
+
+## Look
+
+The site and the video share one visual identity, "Broadside": an ink-black ground (`#111111`), cream text (`#F0ECE5`) and fire-orange (`#E85D26`) as the only accent. Headings are heavy lowercase Barlow; labels and buttons are uppercase IBM Plex Mono. Everything is flat and square, with 1 px hairlines and no shadows or rounded corners.
+
+The video was made with [HyperFrames](https://hyperframes.heygen.com) in a separate project (`~/projects/lan-drop-video` in WSL), with a local Kokoro voice and Pixabay sound effects. Only the finished MP4 and its poster live in this repository.
 
 ## Deploying
 
