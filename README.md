@@ -1,55 +1,106 @@
 # LAN Drop
 
-Share a folder from your computer with anyone who has the link, right from the browser.
+Share a folder from your computer with anyone who has the link, right from the browser. No install, no account, and the files never get stored on a server.
 
-- **Host:** open the page in Chrome or Edge on a computer, click **Choose shared folder…**, and share the code, link or QR code. Keep the tab open while sharing.
-- **Everyone else:** open the link (or enter the code) on any device. Download files from the host's folder and drop files to upload them straight into it.
+**Live:** https://mikkaiser.github.io/lan-drop/
 
-Files go directly between devices over WebRTC; nothing is stored on a server. The free public [PeerJS](https://peerjs.com) broker only introduces devices to each other.
+## Using it
 
-When a network blocks direct connections between devices (common on staff/guest Wi-Fi), data goes through a Cloudflare TURN relay instead. It stays end-to-end encrypted, so the relay can't read it.
+- **Host:** open the site in Chrome or Edge on a computer, click **Choose shared folder…** and allow editing. Share the 6-letter code, the link or the QR code. Keep the tab open while sharing.
+- **Everyone else:** open the link, scan the QR code or type the code, on any device and in any modern browser. Download files from the host's folder, or drop files on the page to upload them straight into it.
+- **Who's connected:** the host's top right shows how many people are connected, their device (e.g. "iPhone · Safari") and their IP address, marked "via relay" when their connection goes through the relay.
+- **Coming back:** reopen the site, or your own share link, in the same browser and click **Resume sharing**. The code stays the same, so links people already have keep working. If Chrome remembers the folder permission ("Allow on every visit"), sharing resumes on its own.
+- **New code** disconnects everyone and makes a fresh code. **Stop sharing** ends the share.
 
-The share code stays the same when the host reloads or switches networks, and guests reconnect on their own. The host sees who is connected (device, and public IP — browsers hide local network IPs).
+| | Host a folder | Join a share |
+|---|---|---|
+| Chrome, Edge, Brave, Opera, Vivaldi, Arc on a computer | ✅ | ✅ |
+| Firefox, Safari | ❌ (no File System Access API) | ✅ |
+| Phones and tablets | ❌ | ✅ |
+
+## How it works
+
+```mermaid
+flowchart LR
+  H["Host browser<br/>(shared folder)"]
+  G["Guest browser"]
+  B["PeerJS broker<br/>introduces the devices"]
+  W["Relay Worker<br/>relay.mikkaiser.com"]
+  T["Cloudflare TURN relay"]
+
+  H -. "1 · register code" .-> B
+  G -. "2 · find code" .-> B
+  G -- "3 · direct connection (when the network allows)" --- H
+  H -. "relay pass" .-> W
+  G -. "relay pass" .-> W
+  G == "4 · otherwise through the relay (end-to-end encrypted)" === T
+  T === H
+```
+
+1. **The folder stays on the host's computer.** The host's page reads and writes it through the browser's File System Access API. Guests' uploads are written straight into it, and files added in Explorer or Finder show up for everyone within about 2 seconds.
+2. **The broker only introduces devices.** The free public [PeerJS](https://peerjs.com) broker matches a guest to the host's code and passes along the connection setup. No file data goes through it.
+3. **WebRTC tries a direct connection first.** On networks that allow it, devices talk to each other directly.
+4. **Otherwise the data goes through a relay.** Many staff and guest Wi-Fi networks block devices from reaching each other. Then the data goes through Cloudflare's TURN relay. Transfers are encrypted from one browser to the other (DTLS), so the relay only passes along data it can't read.
+
+The share code stays the same when the host reloads or switches networks, and guests reconnect on their own.
 
 ## Speed
 
-A single WebRTC connection only keeps a limited amount of data in flight, which caps its speed on long or lossy routes (like the relay). Each guest therefore opens 4 connections to the host and transfers are split into 4 MB segments spread across them (protocol v2); if one connection drops, its segments move to the others. Hosts and guests on older cached pages fall back to a single connection. Every transfer shows its average speed.
+One WebRTC connection only keeps a limited amount of data in flight, which caps its speed on long or lossy routes such as the relay. So:
 
-Across different networks, speed can't exceed the sender's upload or the receiver's download.
+- **4 connections per guest.** Each guest opens one control connection plus three extra "lanes" to the host. The host still counts the guest once.
+- **4 MB segments.** Each file is split into 4 MB segments spread across the lanes, with two segments moving on each lane at a time. Both sides write every segment at its exact position in the file.
+- **Recovery.** If a lane drops, its unfinished segments are sent again on the others.
+- **Compatibility.** Pages that are still running an older cached version fall back to a single connection, in both directions.
+- **Visible speed.** Every transfer shows its average speed, e.g. "45% · 2.3 MB/s".
 
-## Relay (worker/)
+Limits that no app can get around: across different networks, speed can't exceed the sender's upload or the receiver's download. When two devices on the same network have to use the relay, every file goes out to the internet and back in, so it can't reach local network speed.
 
-`worker/` is a Cloudflare Worker that hands browsers short-lived TURN credentials, so the TURN key never appears in this public page. It also guards spending: it reads the account's TURN usage and stops issuing credentials at `RELAY_LIMIT_GB` (900 GB, ingress + egress, last 31 days), below Cloudflare's free 1,000 GB/month. If usage can't be read, it refuses (fail closed) and LAN Drop falls back to direct connections only.
+## The relay (`worker/`)
 
-```
-cd worker
-npx wrangler deploy
-npx wrangler secret put TURN_KEY_ID          # Realtime > TURN Server
-npx wrangler secret put TURN_KEY_API_TOKEN
-npx wrangler secret put ANALYTICS_API_TOKEN  # API token with Account Analytics: Read
-npx wrangler secret put TURNSTILE_SECRET     # Turnstile widget's Secret Key (bot check)
-```
+A browser has to hold relay credentials itself, because the browser connects to the relay directly. `worker/` is a Cloudflare Worker that gives each visitor short-lived credentials (valid for 3 hours), so the long-lived TURN key never appears in the public page.
 
-The Worker is reachable at three addresses, all tried at once: `relay.mikkaiser.com` (custom domain), `lan-drop-relay.pages.dev` (`relay-proxy/`, a Pages project that only forwards to the Worker through a service binding) and `*.workers.dev`. Some networks block the Cloudflare addresses the last two resolve to; the custom domain gets addresses they can reach. Deploy the forwarder with `npx wrangler pages deploy --branch main` from `relay-proxy/`.
+- **Bot check:** the Worker only issues credentials to requests carrying a valid [Cloudflare Turnstile](https://developers.cloudflare.com/turnstile/) token from this page. Real visitors normally see nothing; a checkbox appears only if Turnstile insists. Scripts that fake the `Origin` header are refused. Embedded or automated browsers may fail the check; they then only get direct connections.
+- **Spending guard:** before issuing credentials, the Worker reads the account's TURN usage (ingress + egress, last 31 days). It stops at `RELAY_LIMIT_GB` (900 GB), below Cloudflare's free 1,000 GB a month. If it can't read usage, it refuses (fail closed).
+- **Three addresses, all tried at once:** `relay.mikkaiser.com` (custom domain), `lan-drop-relay.pages.dev` (`relay-proxy/`, a Pages project that only forwards to the Worker through a service binding) and `lan-drop-turn.mikkaiser-ribeiro.workers.dev`. Some networks block the Cloudflare addresses the last two resolve to; the custom domain gets addresses they can reach.
+- **Public IP:** the Worker also tells each browser its public IP, which the host's list shows. Browsers hide local network IPs from web pages.
 
-**Bot check:** with `TURNSTILE_SECRET` set, the Worker only issues credentials to requests carrying a valid Cloudflare Turnstile token, so scripts can't take relay credentials just by faking the `Origin` header. The page gets tokens invisibly (a checkbox appears only if Turnstile insists). Embedded or automated browsers may fail the check; they then only get direct connections. To turn it off: `npx wrangler secret delete TURNSTILE_SECRET`.
+| Setting | Kind | What it is |
+|---|---|---|
+| `TURN_KEY_ID`, `TURN_KEY_API_TOKEN` | Secret | Cloudflare **Realtime → TURN Server** key |
+| `ANALYTICS_API_TOKEN` | Secret | API token with **Account Analytics: Read**, for the spending guard |
+| `TURNSTILE_SECRET` | Secret | Turnstile widget's Secret Key. Delete it to turn the bot check off. |
+| `ALLOWED_ORIGINS`, `ACCOUNT_ID`, `RELAY_LIMIT_GB` | Var in `worker/wrangler.toml` | Allowed sites, account to read usage from, spending limit |
 
-List both URLs in `RELAY_URLS` in `app.js`, and the site's origin in `ALLOWED_ORIGINS` in `worker/wrangler.toml`.
+Secrets live only in Cloudflare; none are in this repository.
 
-## Hosting again after closing the tab
+## Project layout
 
-Reopen the site (or your own share link) in the same browser and click **Resume sharing** — the code stays the same, so links people already have keep working. If Chrome remembers the folder permission ("Allow on every visit"), sharing resumes on its own.
+| Path | What it is |
+|---|---|
+| `index.html`, `app.js` | The whole site: UI, host and guest logic, transfer protocol |
+| `worker/` | Relay Worker: credentials, bot check, spending guard |
+| `relay-proxy/` | Pages forwarder giving the Worker a second address |
 
-## Notes
+## Deploying
 
-- Anyone with the code can see, upload and delete files in the shared folder. Use **New code** to disconnect everyone.
-- Only top-level files are shared (not subfolders).
-- Picking a folder needs the File System Access API (Chrome/Edge desktop). Guests can use any modern browser.
+- **Site:** GitHub Pages serves `main`, so pushing is deploying.
+- **Worker:** `npx wrangler deploy` in `worker/`. Set secrets with `npx wrangler secret put NAME`.
+- **Forwarder:** `npx wrangler pages deploy --branch main` in `relay-proxy/`.
+- **Settings in the page:** in `app.js`, `RELAY_URLS` lists the Worker's addresses and `TURNSTILE_SITE_KEY` holds the Turnstile Site Key (public by design). The site's origin must be in `ALLOWED_ORIGINS`.
 
 ## Run locally
 
-Any static file server works, e.g.:
+Any static file server works, for example:
 
 ```
 python -m http.server 5173
 ```
+
+Turnstile only issues tokens on the widget's hostname, so locally the page asks for relay credentials without a token.
+
+## Notes
+
+- Anyone with the code can see, upload and delete files in the shared folder.
+- Only files directly inside the shared folder are shared, not subfolders.
+- The host must keep the tab open while sharing.
