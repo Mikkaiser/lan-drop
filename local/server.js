@@ -45,6 +45,7 @@ try { sea = require('node:sea'); if (!sea.isSea()) sea = null; } catch { sea = n
 const ASSETS = {
   '/': ['index.html', 'text/html; charset=utf-8'],
   '/app.js': ['app.js', 'text/javascript; charset=utf-8'],
+  '/site.css': ['site.css', 'text/css; charset=utf-8'],
   '/qrcode.js': ['qrcode.js', 'text/javascript; charset=utf-8'],
   '/favicon.svg': ['favicon.svg', 'image/svg+xml'],
   '/favicon-32.png': ['favicon-32.png', 'image/png'],
@@ -348,7 +349,7 @@ async function handleChangeFolder(req, res) {
 }
 
 function serveAsset(res, name, type) {
-  const fresh = name === 'index.html' || name === 'app.js'; // the page itself: always revalidate
+  const fresh = ['index.html', 'app.js', 'site.css'].includes(name); // the page itself: always revalidate
   send(res, 200, asset(name), type, { 'Cache-Control': fresh ? 'no-cache' : 'max-age=86400' });
 }
 

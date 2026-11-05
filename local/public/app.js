@@ -1,208 +1,309 @@
-// LAN Drop Local, page side: talks to the LAN Drop Local program on the host computer over
-// plain HTTP (uploads, downloads) and Server-Sent Events (live file list, addresses, people).
+// LAN Drop Local, page side. Talks to the LAN Drop Local program on the host computer
+// (server.js) over plain HTTP:
+//   GET /events          live updates (Server-Sent Events): info, files, people
+//   POST /upload         one file per request, name in the X-Filename header
+//   GET / DELETE /files/<name>
+//   POST /api/folder     host only: choose a different folder
+//
+// Sections: helpers · live updates · host panel · file list · uploads · drag & drop, pick, paste
 
-const $ = s => document.querySelector(s);
-const IMG = /\.(png|jpe?g|gif|webp|bmp|avif)$/i;
+const MAX_PARALLEL_UPLOADS = 3;
+const SHOW_OFFLINE_AFTER_MS = 5000; // a short blip shouldn't flash the "lost connection" notice
+const IMAGE_FILE = /\.(png|jpe?g|gif|webp|bmp|avif)$/i;
+
+// ---------- Helpers ----------
+
+const $ = selector => document.querySelector(selector);
+
+/** Create an element with properties and children: el('li', { className: 'x' }, 'text', child). */
+function el(tag, props = {}, ...children) {
+  const node = Object.assign(document.createElement(tag), props);
+  node.append(...children);
+  return node;
+}
+
 const fileUrl = name => 'files/' + encodeURIComponent(name);
 
-function fmtSize(b) {
-  const u = ['B', 'KB', 'MB', 'GB', 'TB']; let i = 0;
-  while (b >= 1024 && i < u.length - 1) { b /= 1024; i++; }
-  return (i ? b.toFixed(b < 10 ? 1 : 0) : b) + ' ' + u[i];
+/** 1536 -> "1.5 KB" */
+function formatSize(bytes) {
+  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+  let i = 0;
+  while (bytes >= 1024 && i < units.length - 1) { bytes /= 1024; i++; }
+  return (i ? bytes.toFixed(bytes < 10 ? 1 : 0) : bytes) + ' ' + units[i];
 }
-function ago(t) {
-  const s = (Date.now() - t) / 1000;
-  if (s < 45) return 'just now';
-  if (s < 3600) return Math.round(s / 60) + ' min ago';
-  if (s < 86400) return Math.round(s / 3600) + ' h ago';
-  return new Date(t).toLocaleDateString();
+
+/** A timestamp as "just now", "5 min ago", "3 h ago" or a date. */
+function timeAgo(ms) {
+  const seconds = (Date.now() - ms) / 1000;
+  if (seconds < 45) return 'just now';
+  if (seconds < 3600) return Math.round(seconds / 60) + ' min ago';
+  if (seconds < 86400) return Math.round(seconds / 3600) + ' h ago';
+  return new Date(ms).toLocaleDateString();
 }
+
 let toastTimer;
-function toast(msg) {
-  const t = $('#toast'); t.textContent = msg; t.classList.add('show');
-  clearTimeout(toastTimer); toastTimer = setTimeout(() => t.classList.remove('show'), 2800);
+/** A short message at the bottom of the page. */
+function toast(message) {
+  const box = $('#toast');
+  box.textContent = message;
+  box.classList.add('show');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => box.classList.remove('show'), 2800);
 }
-function el(tag, props = {}, ...kids) {
-  const e = Object.assign(document.createElement(tag), props);
-  e.append(...kids); return e;
-}
 
-// ---------- file list ----------
+// ---------- Live updates from the host ----------
 
-let files = [], known = null;
-function render() {
-  const q = $('#search').value.trim().toLowerCase();
-  const list = q ? files.filter(f => f.name.toLowerCase().includes(q)) : files;
-  const total = files.reduce((n, f) => n + f.size, 0);
-  $('#summary').textContent = files.length ? ` · ${files.length} file${files.length > 1 ? 's' : ''}, ${fmtSize(total)}` : '';
-  const ul = $('#files');
-  if (!list.length) {
-    ul.replaceChildren(el('li', { className: 'empty', textContent: files.length ? 'No matches.' : 'Nothing shared yet. Drop something above.' }));
-  } else {
-    ul.replaceChildren(...list.map(f => {
-      const ext = (f.name.match(/\.([^.]+)$/) || [, ''])[1].slice(0, 4) || 'file';
-      const thumb = el('div', { className: 'thumb' });
-      if (IMG.test(f.name)) thumb.append(el('img', { src: fileUrl(f.name) + '?v=' + f.mtime, loading: 'lazy', alt: '' }));
-      else thumb.textContent = ext;
-      const del = el('button', { className: 'btn del', textContent: 'Delete', title: 'Delete for everyone' });
-      del.onclick = async () => {
-        if (!confirm(`Delete "${f.name}" for everyone?`)) return;
-        const r = await fetch(fileUrl(f.name), { method: 'DELETE' }).catch(() => null);
-        if (!r || !r.ok) toast('Delete failed');
-      };
-      const li = el('li', {},
-        thumb,
-        el('div', { className: 'meta' },
-          el('a', { href: fileUrl(f.name), target: '_blank', textContent: f.name, title: f.name }),
-          el('small', { textContent: `${fmtSize(f.size)} · ${ago(f.mtime)}` })),
-        el('div', { className: 'actions' },
-          el('a', { className: 'btn', href: fileUrl(f.name) + '?dl=1', textContent: 'Download' }),
-          del));
-      if (known && !known.has(f.name)) li.classList.add('new');
-      return li;
-    }));
-  }
-  known = new Set(files.map(f => f.name));
-}
-$('#search').oninput = render;
-setInterval(render, 30000);
+let offlineTimer = null;
 
-// ---------- live updates ----------
-
-let info = null, offlineTimer = null;
 function connect() {
-  const es = new EventSource('events');
-  es.addEventListener('open', () => {
-    clearTimeout(offlineTimer); $('#offline').hidden = true;
+  // EventSource reconnects by itself; we only show what's going on.
+  const events = new EventSource('events');
+  events.addEventListener('open', () => {
+    clearTimeout(offlineTimer);
+    $('#offline').hidden = true;
     $('#dot').className = 'dot on';
   });
-  es.onerror = () => {
-    $('#dot').className = 'dot'; $('#status').textContent = 'Reconnecting…';
+  events.onerror = () => {
+    $('#dot').className = 'dot';
+    $('#status').textContent = 'Reconnecting…';
     clearTimeout(offlineTimer);
-    offlineTimer = setTimeout(() => { $('#offline').hidden = false; }, 5000);
+    offlineTimer = setTimeout(() => { $('#offline').hidden = false; }, SHOW_OFFLINE_AFTER_MS);
   };
-  es.addEventListener('files', e => { files = JSON.parse(e.data); render(); });
-  es.addEventListener('info', e => showInfo(JSON.parse(e.data)));
-  es.addEventListener('people', e => showPeople(JSON.parse(e.data)));
+  events.addEventListener('info', e => showInfo(JSON.parse(e.data)));
+  events.addEventListener('files', e => setFiles(JSON.parse(e.data)));
+  events.addEventListener('people', e => showPeople(JSON.parse(e.data))); // only sent to the host
 }
-connect();
 
-let shownUrl = '';
-function showInfo(i) {
-  info = i;
-  $('#status').textContent = i.host ? 'Sharing from this computer' : `Connected to ${i.hostname}`;
-  $('#footHost').textContent = `LAN Drop Local ${i.version} · ${i.hostname}`;
-  $('#hostPanel').hidden = !i.host;
-  if (!i.host) return;
-  $('#folder').textContent = i.folder || '';
+// ---------- Host panel: addresses, QR code, folder, people ----------
+
+let qrFor = ''; // the address the QR code currently shows
+
+/** info: { version, hostname, urls, host, folder? }. The host panel shows only on the host computer. */
+function showInfo(info) {
+  $('#status').textContent = info.host ? 'Sharing from this computer' : `Connected to ${info.hostname}`;
+  $('#footHost').textContent = `LAN Drop Local ${info.version} · ${info.hostname}`;
+  $('#hostPanel').hidden = !info.host;
+  if (!info.host) return;
+
+  $('#folder').textContent = info.folder || '';
+  showAddresses(info.urls);
+  showQrCode(info.urls[0] || '');
+}
+
+/** The addresses others can open; clicking one copies it. */
+function showAddresses(urls) {
   const box = $('#urls');
-  box.replaceChildren(...(i.urls.length ? i.urls.map(u => el('a', { href: u, textContent: u.replace('http://', ''), title: 'Click to copy' }))
-    : [el('span', { className: 'muted', textContent: 'Not connected to a network yet. Plug in a cable or join a Wi-Fi.' })]));
-  for (const a of box.querySelectorAll('a')) a.onclick = e => {
-    e.preventDefault();
-    navigator.clipboard?.writeText(a.href).then(() => toast('Address copied'), () => toast(a.href));
-  };
-  // QR code of the first address, for phones.
-  const first = i.urls[0] || '';
-  if (first !== shownUrl) {
-    shownUrl = first;
-    if (first && window.qrcode) {
-      const qr = qrcode(0, 'M'); qr.addData(first); qr.make();
-      $('#qr').replaceChildren(el('img', { src: qr.createDataURL(6, 0), alt: 'QR code for ' + first }));
-      $('#qr').hidden = false;
-    } else $('#qr').hidden = true;
+  if (!urls.length) {
+    box.replaceChildren(el('span', { className: 'muted', textContent: 'Not connected to a network yet. Plug in a cable or join a Wi-Fi.' }));
+    return;
   }
+  box.replaceChildren(...urls.map(url => {
+    const link = el('a', { href: url, textContent: url.replace('http://', ''), title: 'Click to copy' });
+    link.onclick = e => {
+      e.preventDefault();
+      navigator.clipboard?.writeText(url).then(() => toast('Address copied'), () => toast(url));
+    };
+    return link;
+  }));
 }
 
+/** A QR code of the first address, for phones. */
+function showQrCode(url) {
+  if (url === qrFor) return;
+  qrFor = url;
+  const box = $('#qr');
+  box.hidden = !url || !window.qrcode;
+  if (box.hidden) return;
+  const qr = window.qrcode(0, 'M');
+  qr.addData(url);
+  qr.make();
+  box.replaceChildren(el('img', { src: qr.createDataURL(6, 0), alt: 'QR code for ' + url }));
+}
+
+/** people: [{ device, ip, since }] */
 function showPeople(people) {
-  $('#peopleLabel').textContent = people.length ? `${people.length} ${people.length > 1 ? 'people' : 'person'} connected` : 'Nobody connected yet';
-  $('#people').replaceChildren(...people.map(p => el('li', {}, el('span', { textContent: p.device }), el('code', { textContent: p.ip }))));
+  const n = people.length;
+  $('#peopleLabel').textContent = n ? `${n} ${n > 1 ? 'people' : 'person'} connected` : 'Nobody connected yet';
+  $('#people').replaceChildren(...people.map(person =>
+    el('li', {}, el('span', { textContent: person.device }), el('code', { textContent: person.ip }))));
 }
 
 $('#folderBtn').onclick = async () => {
   toast('Choose the folder in the window that opened…');
-  const r = await fetch('api/folder', { method: 'POST' }).then(r => r.json()).catch(() => null);
-  if (r?.changed) toast('Now sharing ' + r.folder);
+  const result = await fetch('api/folder', { method: 'POST' }).then(r => r.json()).catch(() => null);
+  if (result?.changed) toast('Now sharing ' + result.folder);
 };
 
-// ---------- uploads (a few at a time, straight into the host's folder) ----------
+// ---------- File list ----------
 
-function transferRow(label, size) {
-  const pct = el('span', { className: 'pct', textContent: 'waiting' });
+let files = [];        // [{ name, size, mtime }], newest first
+let knownNames = null; // to flash rows that just appeared
+
+function setFiles(list) {
+  files = list;
+  renderFiles();
+}
+
+async function deleteFile(file) {
+  if (!confirm(`Delete "${file.name}" for everyone?`)) return;
+  const res = await fetch(fileUrl(file.name), { method: 'DELETE' }).catch(() => null);
+  if (!res || !res.ok) toast('Delete failed');
+  // No need to update the list here: the host announces the change to everyone.
+}
+
+function fileRow(file) {
+  const url = fileUrl(file.name);
+  const thumb = el('div', { className: 'thumb' });
+  if (IMAGE_FILE.test(file.name)) thumb.append(el('img', { src: url + '?v=' + file.mtime, loading: 'lazy', alt: '' }));
+  else thumb.textContent = (file.name.match(/\.([^.]+)$/) || [, ''])[1].slice(0, 4) || 'file';
+
+  const remove = el('button', { className: 'btn del', textContent: 'Delete', title: 'Delete for everyone' });
+  remove.onclick = () => deleteFile(file);
+
+  const row = el('li', {},
+    thumb,
+    el('div', { className: 'meta' },
+      el('a', { href: url, target: '_blank', textContent: file.name, title: file.name }), // opens in the browser if it can
+      el('small', { textContent: `${formatSize(file.size)} · ${timeAgo(file.mtime)}` })),
+    el('div', { className: 'actions' },
+      el('a', { className: 'btn', href: url + '?dl=1', textContent: 'Download' }),
+      remove));
+  if (knownNames && !knownNames.has(file.name)) row.classList.add('new');
+  return row;
+}
+
+function renderFiles() {
+  const query = $('#search').value.trim().toLowerCase();
+  const shown = query ? files.filter(f => f.name.toLowerCase().includes(query)) : files;
+  const total = files.reduce((sum, f) => sum + f.size, 0);
+  $('#summary').textContent = files.length ? ` · ${files.length} file${files.length > 1 ? 's' : ''}, ${formatSize(total)}` : '';
+
+  const list = $('#files');
+  if (shown.length) list.replaceChildren(...shown.map(fileRow));
+  else list.replaceChildren(el('li', { className: 'empty', textContent: files.length ? 'No matches.' : 'Nothing shared yet. Drop something above.' }));
+  knownNames = new Set(files.map(f => f.name));
+}
+
+$('#search').oninput = renderFiles;
+setInterval(renderFiles, 30000); // keeps "5 min ago" current
+
+// ---------- Uploads: a few at a time, straight into the host's folder ----------
+
+/** A row in the uploads list: progress(bytes), done(text?), fail(message). */
+function progressRow(label, size) {
+  const status = el('span', { className: 'pct', textContent: 'waiting' });
   const bar = el('i');
   const row = el('div', { className: 'up' },
-    el('div', { className: 'line' }, el('span', { className: 'name', textContent: `${label} (${fmtSize(size)})` }), pct),
+    el('div', { className: 'line' }, el('span', { className: 'name', textContent: `${label} (${formatSize(size)})` }), status),
     el('div', { className: 'bar' }, bar));
   $('#transfers').append(row);
-  let started = 0;
+
+  let startedAt = 0;
   return {
     progress(bytes) {
-      const now = performance.now(); if (!started) started = now;
-      const p = size ? Math.min(100, Math.round(bytes / size * 100)) : 100;
-      bar.style.width = p + '%';
-      const secs = (now - started) / 1000;
-      pct.textContent = secs > 1 ? `${p}% · ${fmtSize(Math.round(bytes / secs))}/s` : p + '%';
+      const now = performance.now();
+      if (!startedAt) startedAt = now;
+      const percent = size ? Math.min(100, Math.round(bytes / size * 100)) : 100;
+      const seconds = (now - startedAt) / 1000;
+      bar.style.width = percent + '%';
+      status.textContent = seconds > 1 ? `${percent}% · ${formatSize(Math.round(bytes / seconds))}/s` : percent + '%';
     },
-    done(text = 'done') { row.classList.add('done'); pct.textContent = text; setTimeout(() => row.remove(), 1500); },
-    fail(msg) { row.classList.add('err'); pct.textContent = 'failed: ' + msg; setTimeout(() => row.remove(), 6000); },
+    done(text = 'done') {
+      row.classList.add('done');
+      status.textContent = text;
+      setTimeout(() => row.remove(), 1500);
+    },
+    fail(message) {
+      row.classList.add('err');
+      status.textContent = 'failed: ' + message;
+      setTimeout(() => row.remove(), 6000);
+    },
   };
 }
 
-const queue = []; let active = 0; const MAX_PARALLEL = 3;
-function enqueue(list) {
-  for (const f of list) queue.push({ f, ui: transferRow('↑ ' + f.name, f.size) });
-  pump();
+const waiting = [];
+let uploading = 0;
+
+function queueUploads(fileList) {
+  for (const file of fileList) waiting.push({ file, row: progressRow('↑ ' + file.name, file.size) });
+  startUploads();
 }
-function pump() {
-  while (active < MAX_PARALLEL && queue.length) {
-    active++;
-    upload(queue.shift()).finally(() => { active--; pump(); });
+
+function startUploads() {
+  while (uploading < MAX_PARALLEL_UPLOADS && waiting.length) {
+    uploading++;
+    upload(waiting.shift()).finally(() => { uploading--; startUploads(); });
   }
 }
-function upload({ f, ui }) {
+
+/** XMLHttpRequest rather than fetch, because only it reports upload progress. Never rejects. */
+function upload({ file, row }) {
   return new Promise(resolve => {
-    const x = new XMLHttpRequest();
-    x.open('POST', 'upload');
-    x.setRequestHeader('X-Filename', encodeURIComponent(f.name));
-    x.upload.onprogress = e => { if (e.lengthComputable) ui.progress(e.loaded); };
-    x.onload = () => {
-      if (x.status === 201) {
-        const saved = JSON.parse(x.responseText).name;
-        ui.done(saved === f.name ? 'done' : 'saved as ' + saved);
-      } else ui.fail(x.responseText || x.status);
+    const request = new XMLHttpRequest();
+    request.open('POST', 'upload');
+    request.setRequestHeader('X-Filename', encodeURIComponent(file.name));
+    request.upload.onprogress = e => { if (e.lengthComputable) row.progress(e.loaded); };
+    request.onload = () => {
+      if (request.status === 201) {
+        const savedAs = JSON.parse(request.responseText).name; // renamed if the name was taken
+        row.done(savedAs === file.name ? 'done' : 'saved as ' + savedAs);
+      } else {
+        row.fail(request.responseText || request.status);
+      }
       resolve();
     };
-    x.onerror = () => { ui.fail('network error'); resolve(); };
-    x.send(f);
+    request.onerror = () => { row.fail('network error'); resolve(); };
+    request.send(file);
   });
 }
 
-// ---------- drag & drop / pick / paste ----------
+// ---------- Drag & drop, pick, paste ----------
 
-let depth = 0;
-const hasFiles = e => [...(e.dataTransfer?.types || [])].includes('Files');
-addEventListener('dragenter', e => { if (!hasFiles(e)) return; e.preventDefault(); depth++; document.body.classList.add('dragging'); });
-addEventListener('dragover', e => { if (hasFiles(e)) e.preventDefault(); });
-addEventListener('dragleave', e => { if (!hasFiles(e)) return; if (--depth <= 0) { depth = 0; document.body.classList.remove('dragging'); } });
+let dragDepth = 0; // dragenter/dragleave fire for every child element; count them
+const carriesFiles = e => [...(e.dataTransfer?.types || [])].includes('Files');
+
+addEventListener('dragenter', e => {
+  if (!carriesFiles(e)) return;
+  e.preventDefault();
+  dragDepth++;
+  document.body.classList.add('dragging');
+});
+addEventListener('dragover', e => { if (carriesFiles(e)) e.preventDefault(); });
+addEventListener('dragleave', e => {
+  if (!carriesFiles(e)) return;
+  if (--dragDepth <= 0) { dragDepth = 0; document.body.classList.remove('dragging'); }
+});
 addEventListener('drop', e => {
-  if (!hasFiles(e)) return;
-  e.preventDefault(); depth = 0; document.body.classList.remove('dragging');
-  const picked = []; let folders = 0;
+  if (!carriesFiles(e)) return;
+  e.preventDefault();
+  dragDepth = 0;
+  document.body.classList.remove('dragging');
+  const dropped = [];
+  let folders = 0;
   for (const item of e.dataTransfer.items) {
     if (item.kind !== 'file') continue;
     if (item.webkitGetAsEntry?.()?.isDirectory) { folders++; continue; }
-    const f = item.getAsFile(); if (f) picked.push(f);
+    const file = item.getAsFile();
+    if (file) dropped.push(file);
   }
   if (folders) toast(`Skipped ${folders} folder${folders > 1 ? 's' : ''}. Zip it first to share a folder.`);
-  enqueue(picked);
+  queueUploads(dropped);
 });
+
 const picker = $('#picker');
 $('#drop').onclick = () => picker.click();
 $('#drop').onkeydown = e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); picker.click(); } };
-picker.onchange = () => { enqueue([...picker.files]); picker.value = ''; };
+picker.onchange = () => { queueUploads([...picker.files]); picker.value = ''; };
+
 addEventListener('paste', e => {
   if (e.target === $('#search')) return;
-  const pasted = [...(e.clipboardData?.files || [])].map((f, i) =>
-    f.name === 'image.png' ? new File([f], `pasted-${new Date().toISOString().replace(/[:.]/g, '-')}${i ? '-' + i : ''}.png`, { type: f.type }) : f);
-  if (pasted.length) enqueue(pasted);
+  // Pasted screenshots all arrive as "image.png"; give each a unique name.
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+  const pasted = [...(e.clipboardData?.files || [])].map((file, i) =>
+    file.name === 'image.png' ? new File([file], `pasted-${stamp}${i ? '-' + i : ''}.png`, { type: file.type }) : file);
+  if (pasted.length) queueUploads(pasted);
 });
+
+// ---------- Start ----------
+
+connect();
