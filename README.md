@@ -112,7 +112,19 @@ Secrets live only in Cloudflare; none are in this repository.
 
 | Path | What it is |
 |---|---|
-| `index.html`, `app.js` | The whole site: UI, host and guest logic, transfer protocol |
+| `index.html` | The page's markup |
+| `css/site.css` | All the styling, in sections |
+| `js/main.js` | Entry point: join a share, resume hosting, or show the start screen |
+| `js/host.js` | Hosting: the folder, one `GuestSession` per connected guest, the people list |
+| `js/guest.js` | Joining: connecting, lanes, downloads and uploads |
+| `js/protocol.js` | The messages and binary frames between guest and host, sending, the lane scheduler |
+| `js/relay.js` | Relay passes from the Worker, the Turnstile bot check, hourly refresh |
+| `js/routes.js` | Which route a connection took (same network, internet, relay) |
+| `js/files-view.js` | The shared file list, progress rows, drag and drop |
+| `js/modals.js` | Popups, and the footer's video and download panels |
+| `js/config.js` | Every setting and limit in one place |
+| `js/util.js` | Small helpers: formatting, file names, saved settings |
+| `local/` | LAN Drop Local: `server.js` (one file, for the single-executable build), its page in `public/`, `build.mjs` |
 | `how-lan-drop-works.mp4`, `.jpg` | The 50 s explainer video (1080p, 1.8 MB) and its poster; the footer link loads the video only when opened |
 | `fonts/` | Barlow and IBM Plex Mono, self-hosted |
 | `favicon.svg`, `favicon-*.png` | Site icon: an arrow dropping into a tray |
@@ -130,7 +142,7 @@ The video was made with [HyperFrames](https://hyperframes.heygen.com) in a separ
 - **Site:** GitHub Pages serves `main`, so pushing is deploying.
 - **Worker:** `npx wrangler deploy` in `worker/`. Set secrets with `npx wrangler secret put NAME`.
 - **Forwarder:** `npx wrangler pages deploy --branch main` in `relay-proxy/`.
-- **Settings in the page:** in `app.js`, `RELAY_URLS` lists the Worker's addresses and `TURNSTILE_SITE_KEY` holds the Turnstile Site Key (public by design). The site's origin must be in `ALLOWED_ORIGINS`.
+- **Settings in the page:** in `js/config.js`, `RELAY_URLS` lists the Worker's addresses and `TURNSTILE_SITE_KEY` holds the Turnstile Site Key (public by design). The site's origin must be in `ALLOWED_ORIGINS`.
 
 ## Run locally
 

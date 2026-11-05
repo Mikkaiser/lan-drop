@@ -1,0 +1,373 @@
+/*
+ * LAN Drop: the "Broadside" look.
+ * Ink-black ground, cream text, fire-orange as the only accent. Flat, square, 1px hairlines.
+ * Barlow (lowercase, heavy) for everything you read; IBM Plex Mono (uppercase, tracked) for labels.
+ *
+ * Sections: fonts and colours · base · buttons · start screen · header and people list ·
+ * share panel · drop zone and transfers · file list · footer · popups · toast · small screens
+ */
+
+/* ---------- Fonts and colours ---------- */
+
+@font-face { font-family: "Barlow"; src: url("../fonts/barlow-400.woff2") format("woff2"); font-weight: 400; font-display: swap; }
+@font-face { font-family: "Barlow"; src: url("../fonts/barlow-600.woff2") format("woff2"); font-weight: 600; font-display: swap; }
+@font-face { font-family: "Barlow"; src: url("../fonts/barlow-700.woff2") format("woff2"); font-weight: 700; font-display: swap; }
+@font-face { font-family: "Barlow"; src: url("../fonts/barlow-900.woff2") format("woff2"); font-weight: 900; font-display: swap; }
+@font-face { font-family: "IBM Plex Mono"; src: url("../fonts/ibm-plex-mono-400.woff2") format("woff2"); font-weight: 400; font-display: swap; }
+@font-face { font-family: "IBM Plex Mono"; src: url("../fonts/ibm-plex-mono-500.woff2") format("woff2"); font-weight: 500; font-display: swap; }
+
+:root {
+  --ink: #111111;    /* background */
+  --ink-2: #1A1A18;  /* raised surfaces: inputs, notices */
+  --cream: #F0ECE5;  /* text */
+  --muted: #888880;  /* secondary text */
+  --hint: #505048;   /* borders of controls, placeholders */
+  --line: #282826;   /* hairlines */
+  --orange: #E85D26; /* the accent */
+  --mono: "IBM Plex Mono", ui-monospace, monospace;
+}
+
+/* ---------- Base ---------- */
+
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+
+html { background: var(--ink); }
+body {
+  margin: 0;
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  background: var(--ink);
+  color: var(--cream);
+  font: 16px/1.5 "Barlow", system-ui, sans-serif;
+}
+main { width: 100%; max-width: 980px; margin: 0 auto; padding: 40px 16px 64px; flex: 1; }
+::selection { background: var(--orange); color: var(--ink); }
+a { color: var(--orange); }
+
+.muted { color: var(--muted); }
+.label { font-family: var(--mono); font-weight: 500; font-size: 12px; letter-spacing: .14em; text-transform: uppercase; }
+.row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+.notice { border-left: 4px solid var(--orange); background: var(--ink-2); padding: 12px 16px; font-size: 15px; margin-bottom: 20px; }
+
+/* ---------- Buttons ---------- */
+
+.btn {
+  border: 1px solid var(--hint);
+  border-radius: 0;
+  background: transparent;
+  color: var(--cream);
+  padding: 8px 12px;
+  cursor: pointer;
+  font-family: var(--mono);
+  font-weight: 500;
+  font-size: 12px;
+  letter-spacing: .12em;
+  text-transform: uppercase;
+  text-decoration: none;
+  white-space: nowrap;
+}
+.btn:hover:not(:disabled), .btn:focus-visible { border-color: var(--orange); color: var(--orange); outline: none; }
+.btn:disabled { opacity: .4; cursor: not-allowed; }
+
+.btn.primary { background: var(--orange); border-color: var(--orange); color: var(--ink); padding: 13px 20px; font-size: 13px; }
+.btn.primary:hover:not(:disabled), .btn.primary:focus-visible { background: var(--cream); border-color: var(--cream); color: var(--ink); }
+
+/* A button that looks like a link. */
+.linkish { background: none; border: 0; padding: 0; font: inherit; color: var(--orange); text-decoration: underline; cursor: pointer; }
+
+/* ---------- Start screen ---------- */
+
+h1.display { display: block; }
+.display {
+  font-weight: 900;
+  font-size: clamp(64px, 13vw, 150px);
+  line-height: .88;
+  letter-spacing: -.04em;
+  text-transform: lowercase;
+  margin: 0 0 22px;
+}
+.display em { font-style: normal; color: var(--orange); }
+
+.lede { font-size: clamp(18px, 2.2vw, 22px); line-height: 1.45; color: var(--cream); max-width: 640px; margin: 0 0 40px; }
+.lede b { color: var(--orange); font-weight: 600; }
+
+/* Two columns: share a folder | join with a code */
+#start { display: grid; grid-template-columns: 1fr 1fr; border-top: 1px solid var(--line); }
+#start > div { padding: 28px 28px 32px 0; }
+#start > div + div { padding-left: 28px; border-left: 1px solid var(--line); }
+#start h2 { font-weight: 700; font-size: 30px; line-height: 1.1; letter-spacing: -.02em; text-transform: lowercase; margin: 10px 0; }
+#start p { margin: 0 0 22px; color: var(--muted); }
+#start .label { color: var(--orange); }
+
+#code {
+  width: 190px;
+  padding: 11px 14px;
+  background: var(--ink-2);
+  color: var(--orange);
+  border: 1px solid var(--hint);
+  border-radius: 0;
+  font-family: var(--mono);
+  font-weight: 500;
+  font-size: 22px;
+  letter-spacing: .28em;
+  text-transform: uppercase;
+}
+#code::placeholder { color: var(--hint); }
+#code:focus { outline: none; border-color: var(--orange); }
+
+.note { font-size: 14px; color: var(--orange); margin-top: 14px; }
+
+/* ---------- Header: title, status, people connected ---------- */
+
+header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; flex-wrap: wrap; margin-bottom: 26px; }
+h1 {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin: 0;
+  font-weight: 900;
+  font-size: clamp(36px, 6vw, 56px);
+  line-height: .95;
+  letter-spacing: -.035em;
+  text-transform: lowercase;
+  overflow-wrap: anywhere;
+}
+.dot { width: 12px; height: 12px; border-radius: 50%; background: var(--hint); flex: none; }
+.dot.on { background: var(--orange); }
+#status { font-family: var(--mono); font-size: 12px; letter-spacing: .12em; text-transform: uppercase; }
+
+.who { display: grid; justify-items: end; gap: 8px; padding-top: 6px; }
+#guestList { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; font-size: 15px; }
+#guestList li { display: flex; gap: 10px; justify-content: flex-end; align-items: center; }
+#guestList code { font-family: var(--mono); font-size: 12px; color: var(--muted); border: 1px solid var(--line); padding: 2px 7px; }
+#guestList code.route { color: var(--orange); border-color: var(--orange); }
+#guestList code.route.relay { color: var(--muted); border-color: var(--hint); }
+
+/* "X is on your network but going through the relay" */
+#lanHint { display: flex; gap: 16px; align-items: center; justify-content: space-between; flex-wrap: wrap; }
+#lanHint p { margin: 0; flex: 1; min-width: 260px; }
+
+/* ---------- Share panel (host): QR, code, link ---------- */
+
+#hostPanel {
+  display: flex;
+  gap: 28px;
+  align-items: center;
+  flex-wrap: wrap;
+  margin-bottom: 26px;
+  padding: 26px 0;
+  border-top: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+}
+#hostPanel .info { flex: 1; min-width: 260px; display: grid; gap: 10px; }
+#hostPanel .label { color: var(--orange); }
+#qr { width: 150px; height: 150px; background: var(--cream); padding: 8px; flex: none; }
+#qr img { width: 100%; height: 100%; image-rendering: pixelated; display: block; }
+
+.bigcode { font-weight: 900; font-size: clamp(48px, 8vw, 76px); line-height: .9; letter-spacing: .08em; color: var(--orange); }
+.link { font-family: var(--mono); font-size: 13px; word-break: break-all; }
+.link a { color: var(--cream); text-decoration-color: var(--hint); }
+.link a:hover { color: var(--orange); }
+
+/* ---------- Drop zone and transfers ---------- */
+
+#drop { border: 2px dashed var(--hint); background: transparent; padding: 44px 16px; text-align: center; cursor: pointer; transition: border-color .15s, background .15s; }
+#drop:hover, #drop:focus-visible { border-color: var(--orange); background: var(--ink-2); outline: none; }
+#drop strong { display: block; font-weight: 900; font-size: clamp(26px, 4vw, 38px); line-height: 1; letter-spacing: -.03em; text-transform: lowercase; margin-bottom: 10px; }
+#drop span { font-family: var(--mono); font-size: 12px; letter-spacing: .12em; text-transform: uppercase; color: var(--muted); }
+
+/* Full-page "drop it" while dragging files over the page */
+#overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 10;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  background: rgba(232, 93, 38, .94);
+  color: var(--ink);
+  font-weight: 900;
+  font-size: clamp(48px, 10vw, 120px);
+  letter-spacing: -.04em;
+  text-transform: lowercase;
+  pointer-events: none;
+}
+body.dragging #overlay { display: flex; }
+
+/* One row per upload/download in progress */
+#transfers { margin-top: 14px; display: grid; gap: 8px; }
+#transfers:empty { display: none; }
+.up { border: 1px solid var(--line); padding: 10px 14px; font-size: 14px; }
+.up .line { display: flex; justify-content: space-between; gap: 12px; }
+.up .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.up .pct { font-family: var(--mono); font-size: 12px; color: var(--muted); flex: none; }
+.up.err .pct, .up.done .pct { color: var(--orange); }
+.bar { height: 4px; background: var(--line); margin-top: 8px; overflow: hidden; }
+.bar i { display: block; height: 100%; width: 0; background: var(--orange); transition: width .1s; }
+.up.err .bar i { background: var(--hint); width: 100%; }
+.up.done .bar i { width: 100%; }
+
+/* ---------- File list ---------- */
+
+.toolbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-end;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin: 40px 0 0;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--line);
+}
+.toolbar h2 { font-weight: 900; font-size: 30px; line-height: 1; letter-spacing: -.03em; text-transform: lowercase; margin: 0; }
+#summary { font-family: var(--mono); font-weight: 500; font-size: 12px; letter-spacing: .12em; text-transform: uppercase; color: var(--muted); margin-left: 10px; }
+#search { width: 240px; max-width: 100%; padding: 9px 12px; background: var(--ink-2); color: var(--cream); border: 1px solid var(--hint); border-radius: 0; font: inherit; font-size: 15px; }
+#search:focus { outline: none; border-color: var(--orange); }
+
+#files { list-style: none; margin: 0; padding: 0; }
+#files li { display: flex; align-items: center; gap: 14px; padding: 14px 0; border-bottom: 1px solid var(--line); }
+#files li.new { animation: flash 2s ease-out; } /* just appeared */
+@keyframes flash { from { background: rgba(232, 93, 38, .18); } }
+
+.thumb {
+  width: 52px;
+  height: 52px;
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--orange);
+  color: var(--orange);
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+}
+.meta { flex: 1; min-width: 0; }
+.meta b { display: block; font-weight: 600; font-size: 17px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.meta small { font-family: var(--mono); font-size: 12px; letter-spacing: .06em; color: var(--muted); }
+.actions { display: flex; gap: 8px; flex: none; }
+.empty { padding: 40px 0 !important; justify-content: center; color: var(--muted); font-size: 17px; }
+
+/* ---------- Footer: "How LAN Drop works" and "Download LAN Drop Local" ---------- */
+
+footer { border-top: 1px solid var(--line); }
+footer .inner { max-width: 980px; margin: 0 auto; padding: 20px 16px 28px; display: flex; justify-content: space-between; align-items: center; gap: 16px; flex-wrap: wrap; }
+footer .label { color: var(--muted); }
+
+#howBtn, #localBtn {
+  display: inline-flex;
+  align-items: center;
+  gap: 12px;
+  background: none;
+  border: 0;
+  padding: 0;
+  cursor: pointer;
+  color: var(--cream);
+  font-family: var(--mono);
+  font-weight: 500;
+  font-size: 13px;
+  letter-spacing: .14em;
+  text-transform: uppercase;
+}
+#howBtn:hover, #howBtn:focus-visible, #localBtn:hover, #localBtn:focus-visible { color: var(--orange); outline: none; }
+
+/* The orange square icon in front of each */
+#howBtn .play, #localBtn .play { width: 34px; height: 34px; background: var(--orange); display: inline-flex; align-items: center; justify-content: center; flex: none; }
+#howBtn .play::before { /* play triangle */
+  content: "";
+  border-left: 11px solid var(--ink);
+  border-top: 7px solid transparent;
+  border-bottom: 7px solid transparent;
+  margin-left: 3px;
+}
+#localBtn .play::before { /* download arrow */
+  content: "";
+  width: 12px;
+  height: 14px;
+  background: var(--ink);
+  clip-path: polygon(30% 0, 70% 0, 70% 45%, 100% 45%, 50% 85%, 0 45%, 30% 45%);
+}
+
+/* ---------- Popups ---------- */
+
+.modal {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  overflow-y: auto;
+  background: rgba(17, 17, 17, .94);
+}
+.modal .frame { width: min(1120px, 100%); }
+.modal .bar-top { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-bottom: 12px; }
+.modal .bar-top .label { color: var(--orange); }
+
+/* The video */
+#howVideo { display: block; width: 100%; aspect-ratio: 16 / 9; background: var(--ink-2); border: 1px solid var(--line); }
+
+/* Download LAN Drop Local */
+#localModal .frame { width: min(760px, 100%); background: var(--ink); border: 1px solid var(--line); padding: 24px; }
+#localModal h2 { font-weight: 900; font-size: clamp(32px, 5.5vw, 52px); line-height: .92; letter-spacing: -.04em; text-transform: lowercase; margin: 4px 0 14px; }
+#localModal h2 em { font-style: normal; color: var(--orange); }
+#localModal p { margin: 0 0 16px; }
+#localModal small { display: block; color: var(--muted); font-size: 14px; margin-top: 10px; }
+#localPrimary { display: inline-block; margin: 6px 0 22px; }
+#localOthers { list-style: none; margin: 0 0 18px; padding: 0; border-top: 1px solid var(--line); }
+#localOthers li { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; padding: 10px 0; border-bottom: 1px solid var(--line); }
+
+/* Turn on direct local-network connections */
+#lanHelp .frame { width: min(720px, 100%); background: var(--ink); border: 1px solid var(--line); padding: 24px; }
+#lanHelp h2 { font-weight: 900; font-size: clamp(30px, 5vw, 44px); line-height: .95; letter-spacing: -.035em; text-transform: lowercase; margin: 4px 0 16px; }
+#lanHelp ol { margin: 0 0 18px; padding-left: 22px; display: grid; gap: 12px; }
+#lanHelp code { font-family: var(--mono); font-size: 13px; color: var(--orange); word-break: break-all; }
+#lanHelp .copyrow { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-top: 6px; }
+#lanHelp small { display: block; color: var(--muted); font-size: 14px; margin-top: 12px; }
+#lanHelpState { font-family: var(--mono); font-size: 12px; letter-spacing: .1em; text-transform: uppercase; color: var(--orange); margin: 0 0 14px; }
+
+/* ---------- Toast and the bot-check box ---------- */
+
+#toast {
+  position: fixed;
+  left: 50%;
+  bottom: 20px;
+  z-index: 50;
+  max-width: calc(100% - 32px);
+  padding: 11px 16px;
+  background: var(--orange);
+  color: var(--ink);
+  font-size: 15px;
+  font-weight: 600;
+  opacity: 0;
+  transform: translateX(-50%) translateY(20px);
+  transition: .2s;
+  pointer-events: none;
+}
+#toast.show { opacity: 1; transform: translateX(-50%); }
+
+/* Cloudflare Turnstile, visible only if it asks for a click */
+#ts-box { position: fixed; right: 16px; bottom: 16px; z-index: 30; }
+
+/* ---------- Small screens ---------- */
+
+@media (max-width: 700px) {
+  #start { grid-template-columns: 1fr; }
+  #start > div { padding: 24px 0 28px; }
+  #start > div + div { padding-left: 0; border-left: 0; border-top: 1px solid var(--line); }
+}
+
+@media (max-width: 560px) {
+  main { padding-top: 28px; }
+  .who { justify-items: start; padding-top: 0; }
+  #guestList li { justify-content: flex-start; }
+  #search { width: 100%; }
+  #qr { width: 120px; height: 120px; }
+  #files li { flex-wrap: wrap; }
+  .actions { width: 100%; padding-left: 66px; }
+}

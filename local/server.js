@@ -7,6 +7,16 @@
 //   lan-drop-local [--folder <path>] [--port <n>] [--no-open] [--choose]
 //
 // The folder is remembered in ~/.lan-drop-local.json; --choose asks again.
+//
+// HTTP API (used by public/app.js):
+//   GET    /, /app.js, /fonts/…   the page (embedded in the executable, or from public/)
+//   GET    /events                Server-Sent Events: info, files, people (people: host only)
+//   POST   /upload                body = the file, header X-Filename = its name (URI-encoded)
+//   GET    /files/<name>          download (?dl=1 forces a download; Range supported)
+//   DELETE /files/<name>          delete for everyone
+//   POST   /api/folder            host only: pick a different folder with the system dialog
+//
+// This stays one file on purpose: the single-executable build (build.mjs) bundles exactly one script.
 
 const http = require('http');
 const fs = require('fs');
@@ -145,13 +155,21 @@ const clientIp = req => String(req.socket.remoteAddress || '').replace(/^::ffff:
 // The host is whoever opens the page on this computer (loopback, or one of its own addresses).
 const isHost = req => { const ip = clientIp(req); return ip === '127.0.0.1' || ip === '::1' || ownAddresses().has(ip); };
 
+/** "iPhone · Safari"-style label from a User-Agent, so the host can tell devices apart. */
 function deviceLabel(ua = '') {
-  const os_ = /iPhone/.test(ua) ? 'iPhone' : /iPad/.test(ua) ? 'iPad' : /Android/.test(ua) ? 'Android'
-    : /Windows/.test(ua) ? 'Windows' : /Mac OS X|Macintosh/.test(ua) ? 'Mac' : /CrOS/.test(ua) ? 'ChromeOS'
+  const system = /iPhone/.test(ua) ? 'iPhone'
+    : /iPad/.test(ua) ? 'iPad'
+    : /Android/.test(ua) ? 'Android'
+    : /Windows/.test(ua) ? 'Windows'
+    : /Mac OS X|Macintosh/.test(ua) ? 'Mac'
+    : /CrOS/.test(ua) ? 'ChromeOS'
     : /Linux/.test(ua) ? 'Linux' : 'Device';
-  const browser = /Edg\//.test(ua) ? 'Edge' : /OPR\//.test(ua) ? 'Opera' : /Firefox\//.test(ua) ? 'Firefox'
-    : /Chrome\/|CriOS\//.test(ua) ? 'Chrome' : /Safari\//.test(ua) ? 'Safari' : 'Browser';
-  return `${os_} · ${browser}`;
+  const browser = /Edg\//.test(ua) ? 'Edge'
+    : /OPR\//.test(ua) ? 'Opera'
+    : /Firefox\//.test(ua) ? 'Firefox'
+    : /Chrome\/|CriOS\//.test(ua) ? 'Chrome'
+    : /Safari\//.test(ua) ? 'Safari' : 'Browser';
+  return `${system} · ${browser}`;
 }
 
 function listFiles() {
@@ -208,7 +226,7 @@ function contentDisposition(kind, name) {
 
 // ---------- live updates (Server-Sent Events) ----------
 
-// res -> { ip, device, host, since }
+// Every open page: its event-stream response -> { ip, device, host, since }
 const clients = new Map();
 
 function sse(res, event, data) { res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`); }
@@ -222,18 +240,19 @@ function broadcastFiles() {
   }, 150);
 }
 
-const infoFor = c => ({
-  version: VERSION, hostname: os.hostname(), urls: lanUrls(), host: c.host,
-  ...(c.host ? { folder: DIR } : {}),
+const infoFor = client => ({
+  version: VERSION, hostname: os.hostname(), urls: lanUrls(), host: client.host,
+  ...(client.host ? { folder: DIR } : {}),
 });
-function broadcastInfo() { for (const [res, c] of clients) sse(res, 'info', infoFor(c)); }
+function broadcastInfo() { for (const [res, client] of clients) sse(res, 'info', infoFor(client)); }
 
 // Only the host sees who is connected (and from which address).
 function broadcastPeople() {
   const people = [...clients.values()].filter(c => !c.host).map(c => ({ device: c.device, ip: c.ip, since: c.since }));
-  for (const [res, c] of clients) if (c.host) sse(res, 'people', people);
+  for (const [res, client] of clients) if (client.host) sse(res, 'people', people);
 }
 
+// A comment line every 20 s keeps idle connections from being closed by proxies and sleep timers.
 setInterval(() => { for (const res of clients.keys()) res.write(': ping\n\n'); }, 20000);
 
 // New Wi-Fi or a cable plugged in: the addresses change, so tell everyone.
@@ -278,11 +297,13 @@ function handleDownload(req, res, file, url) {
   };
   // Single-range support so videos and audio can seek.
   const size = file.st.size;
-  const m = /^bytes=(\d*)-(\d*)$/.exec(req.headers.range || '');
-  if (m && (m[1] || m[2])) {
-    let start = m[1] ? Number(m[1]) : size - Number(m[2]);
-    let end = m[1] && m[2] ? Number(m[2]) : size - 1;
-    start = Math.max(0, start); end = Math.min(end, size - 1);
+  const range = /^bytes=(\d*)-(\d*)$/.exec(req.headers.range || '');
+  if (range && (range[1] || range[2])) {
+    const [, from, to] = range;
+    let start = from ? Number(from) : size - Number(to); // "bytes=-500" means the last 500
+    let end = from && to ? Number(to) : size - 1;
+    start = Math.max(0, start);
+    end = Math.min(end, size - 1);
     if (start > end) { res.writeHead(416, { 'Content-Range': `bytes */${size}` }); return res.end(); }
     res.writeHead(206, { ...headers, 'Content-Range': `bytes ${start}-${end}/${size}`, 'Content-Length': end - start + 1 });
     return fs.createReadStream(file.full, { start, end }).pipe(res);
@@ -292,51 +313,60 @@ function handleDownload(req, res, file, url) {
   fs.createReadStream(file.full).pipe(res);
 }
 
+function handleDelete(req, res, file) {
+  fs.rm(file.full, { force: true }, err => {
+    if (err) return send(res, 500, 'Delete failed');
+    log(`deleted ${file.name} (by ${clientIp(req)})`);
+    send(res, 204, '');
+    broadcastFiles();
+  });
+}
+
+function handleEvents(req, res) {
+  res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-store', Connection: 'keep-alive' });
+  const client = { ip: clientIp(req), device: deviceLabel(req.headers['user-agent']), host: isHost(req), since: Date.now() };
+  clients.set(res, client);
+  sse(res, 'info', infoFor(client));
+  sse(res, 'files', listFiles());
+  broadcastPeople();
+  if (!client.host) log(`${client.device} connected from ${client.ip}`);
+  req.on('close', () => {
+    clients.delete(res);
+    broadcastPeople();
+    if (!client.host) log(`${client.device} (${client.ip}) left`);
+  });
+}
+
+// Change the shared folder: only from the host computer, with its own folder picker.
+async function handleChangeFolder(req, res) {
+  if (!isHost(req)) return send(res, 403, 'Only the host computer can change the folder');
+  const picked = await pickFolder(DIR);
+  if (!picked) return json(res, 200, { changed: false, folder: DIR });
+  useFolder(picked);
+  log(`now sharing ${DIR}`);
+  json(res, 200, { changed: true, folder: DIR });
+}
+
+function serveAsset(res, name, type) {
+  const fresh = name === 'index.html' || name === 'app.js'; // the page itself: always revalidate
+  send(res, 200, asset(name), type, { 'Cache-Control': fresh ? 'no-cache' : 'max-age=86400' });
+}
+
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, 'http://localhost');
-  const p = url.pathname;
+  const pathname = url.pathname === '/index.html' ? '/' : url.pathname;
+  const { method } = req;
 
-  if (req.method === 'GET' && ASSETS[p === '/index.html' ? '/' : p]) {
-    const [name, type] = ASSETS[p === '/index.html' ? '/' : p];
-    return send(res, 200, asset(name), type, { 'Cache-Control': name === 'index.html' || name === 'app.js' ? 'no-cache' : 'max-age=86400' });
-  }
+  if (method === 'GET' && ASSETS[pathname]) return serveAsset(res, ...ASSETS[pathname]);
+  if (method === 'GET' && pathname === '/events') return handleEvents(req, res);
+  if (method === 'POST' && pathname === '/upload') return void handleUpload(req, res);
+  if (method === 'POST' && pathname === '/api/folder') return handleChangeFolder(req, res);
 
-  if (req.method === 'GET' && p === '/events') {
-    res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-store', Connection: 'keep-alive' });
-    const c = { ip: clientIp(req), device: deviceLabel(req.headers['user-agent']), host: isHost(req), since: Date.now() };
-    clients.set(res, c);
-    sse(res, 'info', infoFor(c));
-    sse(res, 'files', listFiles());
-    broadcastPeople();
-    if (!c.host) log(`${c.device} connected from ${c.ip}`);
-    req.on('close', () => { clients.delete(res); broadcastPeople(); if (!c.host) log(`${c.device} (${c.ip}) left`); });
-    return;
-  }
-
-  if (req.method === 'POST' && p === '/upload') return void handleUpload(req, res);
-
-  // Change the shared folder: only from the host computer, with its own folder picker.
-  if (req.method === 'POST' && p === '/api/folder') {
-    if (!isHost(req)) return send(res, 403, 'Only the host computer can change the folder');
-    const picked = await pickFolder(DIR);
-    if (!picked) return json(res, 200, { changed: false, folder: DIR });
-    useFolder(picked);
-    log(`now sharing ${DIR}`);
-    return json(res, 200, { changed: true, folder: DIR });
-  }
-
-  if (p.startsWith('/files/')) {
-    const file = resolveFile(p.slice('/files/'.length));
+  if (pathname.startsWith('/files/')) {
+    const file = resolveFile(pathname.slice('/files/'.length));
     if (!file) return send(res, 404, 'Not found');
-    if (req.method === 'GET' || req.method === 'HEAD') return handleDownload(req, res, file, url);
-    if (req.method === 'DELETE') {
-      return fs.rm(file.full, { force: true }, err => {
-        if (err) return send(res, 500, 'Delete failed');
-        log(`deleted ${file.name} (by ${clientIp(req)})`);
-        send(res, 204, '');
-        broadcastFiles();
-      });
-    }
+    if (method === 'GET' || method === 'HEAD') return handleDownload(req, res, file, url);
+    if (method === 'DELETE') return handleDelete(req, res, file);
   }
 
   send(res, 404, 'Not found');
