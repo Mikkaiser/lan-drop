@@ -10,6 +10,20 @@ Share a folder from your computer with anyone who has the link, right from the b
 
 *Click the image to play the video.* It's also on the site: **How LAN Drop works**, in the footer.
 
+## Offline: LAN Drop Local
+
+For networks with no internet (a router on its own, a phone hotspot without data, or two computers joined by an Ethernet cable) there's **LAN Drop Local**, a small program the host runs. Download it from the site's footer (**Download LAN Drop Local**) or the [releases page](https://github.com/Mikkaiser/lan-drop/releases/latest).
+
+- **Host:** run the program, pick the folder to share (it remembers it), and LAN Drop Local opens in the browser with the address and a QR code. **Change folder** picks another one.
+- **Everyone else:** open that address, e.g. `http://192.168.1.20:8080`, in any browser on any device. No account, no internet, and no Chrome/Edge requirement.
+- **How files travel:** over plain HTTP straight between the guest's browser and the host's computer, with no broker or relay. That's full local-network speed.
+- **Who's connected:** the host sees each person's device and real local IP.
+- **The look:** the same Broadside look as the site, with live file list updates. It follows network changes, such as plugging in a cable.
+
+Source: [`local/`](local/). `server.js` is the program, with no dependencies beyond Node, and `public/` is its page. `node local/server.js` runs it from source; `node local/build.mjs` builds a single-file program for the current platform. Pushing a `local-v*` tag runs [`.github/workflows/local-release.yml`](.github/workflows/local-release.yml), which builds Windows, Mac (Apple Silicon and Intel) and Linux versions and publishes them as a release. Options: `--folder <path>`, `--port <n>`, `--choose`, `--no-open`.
+
+The programs aren't code-signed yet. On Windows, SmartScreen asks for **More info → Run anyway**; on a Mac, **right-click → Open** the first time.
+
 ## Using it
 
 - **Host:** open the site in Chrome or Edge on a computer, click **Choose shared folder…** and allow editing. Share the 6-letter code, the link or the QR code. Keep the tab open while sharing.

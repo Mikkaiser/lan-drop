@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <!-- LAN Drop: an arrow dropping into a tray, Broadside fire-orange and ink -->
+  <rect width="64" height="64" fill="#E85D26"/>
+  <path d="M32 10 V40" stroke="#111111" stroke-width="9"/>
+  <path d="M17 27 L32 42 L47 27" fill="none" stroke="#111111" stroke-width="9" stroke-linecap="square" stroke-linejoin="miter"/>
+  <rect x="11" y="48" width="42" height="7" fill="#111111"/>
+</svg>

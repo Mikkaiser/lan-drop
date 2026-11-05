@@ -1233,7 +1233,40 @@ addEventListener('keydown', e => {
   if (e.key !== 'Escape') return;
   if (!$('#howModal').hidden) closeHowVideo();
   if (!$('#lanHelp').hidden) closeLanHelp();
+  if (!$('#localModal').hidden) closeLocal();
 });
+
+// ---------- "Download LAN Drop Local" (footer): the offline program, from GitHub Releases ----------
+
+const LOCAL_DL = 'https://github.com/Mikkaiser/lan-drop/releases/latest/download/';
+const LOCAL_BUILDS = [
+  { id: 'windows', label: 'Windows', file: 'lan-drop-local-windows-x64.exe' },
+  { id: 'mac-arm64', label: 'Mac with Apple Silicon (M1 and later)', file: 'lan-drop-local-mac-arm64.zip' },
+  { id: 'mac-x64', label: 'Mac with Intel', file: 'lan-drop-local-mac-x64.zip' },
+  { id: 'linux', label: 'Linux', file: 'lan-drop-local-linux-x64.tar.gz' },
+];
+function visitorBuild() {
+  const p = (navigator.userAgentData?.platform || navigator.platform || navigator.userAgent).toLowerCase();
+  if (p.includes('win')) return 'windows';
+  if (p.includes('mac')) return 'mac-arm64'; // browsers don't say which chip; most current Macs are Apple Silicon
+  if (p.includes('linux') && !/android/i.test(navigator.userAgent)) return 'linux';
+  return null;
+}
+function openLocal() {
+  const mine = visitorBuild();
+  const primary = $('#localPrimary');
+  const pick = LOCAL_BUILDS.find(b => b.id === mine);
+  primary.hidden = !pick;
+  if (pick) { primary.href = LOCAL_DL + pick.file; primary.textContent = `Download for ${pick.label}`; }
+  $('#localOthers').replaceChildren(...LOCAL_BUILDS.filter(b => b !== pick).map(b =>
+    el('li', {}, el('span', { textContent: b.label }), el('a', { className: 'btn', href: LOCAL_DL + b.file, textContent: 'Download' }))));
+  $('#localModal').hidden = false;
+  $('#localClose').focus();
+}
+function closeLocal() { $('#localModal').hidden = true; $('#localBtn').focus(); }
+$('#localBtn').onclick = openLocal;
+$('#localClose').onclick = closeLocal;
+$('#localModal').addEventListener('click', e => { if (e.target === $('#localModal')) closeLocal(); });
 
 // "Turn on direct connections" panel (host only)
 $('#lanHintBtn').onclick = openLanHelp;

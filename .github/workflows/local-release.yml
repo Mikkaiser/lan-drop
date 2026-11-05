@@ -1,0 +1,71 @@
+# Builds LAN Drop Local (local/) as one self-contained program per platform and, for a
+# `local-v*` tag, publishes them as a GitHub Release. The website's download links point at
+# releases/latest/download/<file>, so a new tag updates the downloads.
+#
+#   git tag local-v1.0.0 && git push origin local-v1.0.0
+#
+# "Run workflow" (workflow_dispatch) builds without releasing; the files are kept as artifacts.
+name: LAN Drop Local
+
+on:
+  push:
+    tags: ['local-v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: windows-latest, arch: x64 }
+          - { os: macos-latest, arch: arm64 }
+          - { os: macos-latest, arch: x64 }
+          - { os: ubuntu-latest, arch: x64 }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          architecture: ${{ matrix.arch }}
+      - name: Build
+        run: node local/build.mjs
+      # Browsers drop the "executable" permission on download, so Mac and Linux ship in archives.
+      - name: Package (macOS)
+        if: runner.os == 'macOS'
+        working-directory: local/dist
+        run: ditto -c -k --keepParent lan-drop-local-mac-${{ matrix.arch }} lan-drop-local-mac-${{ matrix.arch }}.zip
+      - name: Package (Linux)
+        if: runner.os == 'Linux'
+        working-directory: local/dist
+        run: tar czf lan-drop-local-linux-${{ matrix.arch }}.tar.gz lan-drop-local-linux-${{ matrix.arch }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lan-drop-local-${{ runner.os }}-${{ matrix.arch }}
+          path: |
+            local/dist/*.exe
+            local/dist/*.zip
+            local/dist/*.tar.gz
+
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/local-v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --title "LAN Drop Local ${GITHUB_REF_NAME#local-v}" \
+            --notes-file local/RELEASE_NOTES.md \
+            --latest
