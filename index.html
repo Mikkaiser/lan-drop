@@ -77,6 +77,12 @@
   #guestList { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; font-size: 15px; }
   #guestList li { display: flex; gap: 10px; justify-content: flex-end; align-items: center; }
   #guestList code { font-family: var(--mono); font-size: 12px; color: var(--muted); border: 1px solid var(--line); padding: 2px 7px; }
+  #guestList code.route { color: var(--orange); border-color: var(--orange); }
+  #guestList code.route.relay { color: var(--muted); border-color: var(--hint); }
+  .linkish { background: none; border: 0; padding: 0; font: inherit; color: var(--orange); text-decoration: underline; cursor: pointer; }
+  #lanHint { display: flex; gap: 16px; align-items: center; justify-content: space-between; flex-wrap: wrap; }
+  #lanHint[hidden] { display: none; }
+  #lanHint p { margin: 0; flex: 1; min-width: 260px; }
   @media (max-width: 560px) { .who { justify-items: start; padding-top: 0; } #guestList li { justify-content: flex-start; } }
 
   .notice { border-left: 4px solid var(--orange); background: var(--ink-2); padding: 12px 16px; font-size: 15px; margin-bottom: 20px; }
@@ -140,10 +146,18 @@
   #howBtn .play { width: 34px; height: 34px; background: var(--orange); display: inline-flex; align-items: center; justify-content: center; flex: none; }
   #howBtn .play::before { content: ""; border-left: 11px solid var(--ink); border-top: 7px solid transparent; border-bottom: 7px solid transparent; margin-left: 3px; }
   #howBtn:hover, #howBtn:focus-visible { color: var(--orange); outline: none; }
-  #howModal { position: fixed; inset: 0; z-index: 40; background: rgba(17, 17, 17, .94); display: flex; align-items: center; justify-content: center; padding: 16px; }
-  #howModal .frame { width: min(1120px, 100%); }
-  #howModal .bar-top { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-bottom: 12px; }
-  #howModal .bar-top .label { color: var(--orange); }
+  .modal { position: fixed; inset: 0; z-index: 40; background: rgba(17, 17, 17, .94); display: flex; align-items: center; justify-content: center; padding: 16px; overflow-y: auto; }
+  .modal[hidden] { display: none; }
+  .modal .frame { width: min(1120px, 100%); }
+  .modal .bar-top { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-bottom: 12px; }
+  .modal .bar-top .label { color: var(--orange); }
+  #lanHelp .frame { width: min(720px, 100%); background: var(--ink); border: 1px solid var(--line); padding: 24px; }
+  #lanHelp h2 { font-weight: 900; font-size: clamp(30px, 5vw, 44px); line-height: .95; letter-spacing: -.035em; text-transform: lowercase; margin: 4px 0 16px; }
+  #lanHelp ol { margin: 0 0 18px; padding-left: 22px; display: grid; gap: 12px; }
+  #lanHelp code { font-family: var(--mono); font-size: 13px; color: var(--orange); word-break: break-all; }
+  #lanHelp .copyrow { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-top: 6px; }
+  #lanHelp small { display: block; color: var(--muted); font-size: 14px; margin-top: 12px; }
+  #lanHelpState { font-family: var(--mono); font-size: 12px; letter-spacing: .1em; text-transform: uppercase; color: var(--orange); margin: 0 0 14px; }
   #howVideo { display: block; width: 100%; aspect-ratio: 16 / 9; background: var(--ink-2); border: 1px solid var(--line); }
 
   #toast { position: fixed; left: 50%; bottom: 20px; transform: translateX(-50%) translateY(20px); background: var(--orange); color: var(--ink);
@@ -202,6 +216,10 @@
     </header>
 
     <div class="notice" id="notice" hidden></div>
+    <div class="notice" id="lanHint" hidden>
+      <p id="lanHintText"></p>
+      <button class="btn" id="lanHintBtn" type="button">Turn on direct connections</button>
+    </div>
 
     <div id="hostPanel" hidden>
       <div id="qr"></div>
@@ -215,6 +233,7 @@
           <button class="btn del" id="stopBtn">Stop sharing</button>
         </div>
         <div class="muted" style="font-size:14px">Keep this tab open. Closing it stops sharing.</div>
+        <div class="muted" style="font-size:14px" id="lanMode" hidden></div>
       </div>
     </div>
 
@@ -241,7 +260,32 @@
 </footer>
 
 <!-- How it works: 50 s video, loaded only when opened -->
-<div id="howModal" hidden role="dialog" aria-modal="true" aria-label="How LAN Drop works">
+<!-- Host only: how to let devices on the same network connect directly instead of via the relay -->
+<div id="lanHelp" class="modal" hidden role="dialog" aria-modal="true" aria-label="Turn on direct connections">
+  <div class="frame">
+    <div class="bar-top">
+      <span class="label">Host · one-time setting</span>
+      <button class="btn" id="lanHelpClose" type="button">✕ Close</button>
+    </div>
+    <h2>turn on direct connections.</h2>
+    <p id="lanHelpState"></p>
+    <p>For privacy, Chrome and Edge hide this computer's local network address behind a random name. Many networks can't look those names up, so people on your own network end up going through the relay, out to the internet and back. Letting this browser show its local address lets them connect straight through your router. Only this computer, the host, needs it.</p>
+    <ol>
+      <li>Copy this address and open it in a new tab of this browser:
+        <div class="copyrow"><code>chrome://flags/#enable-webrtc-hide-local-ips-with-mdns</code>
+          <button class="btn" type="button" data-copy="chrome://flags/#enable-webrtc-hide-local-ips-with-mdns">Copy</button></div>
+        <div class="copyrow"><span class="muted">In Edge:</span> <code>edge://flags/#enable-webrtc-hide-local-ips-with-mdns</code>
+          <button class="btn" type="button" data-copy="edge://flags/#enable-webrtc-hide-local-ips-with-mdns">Copy</button></div>
+      </li>
+      <li>Set <b>Anonymize local IPs exposed by WebRTC</b> to <b>Disabled</b>, then click <b>Relaunch</b>.</li>
+      <li>Come back here and click <b>Resume sharing</b>. Your code stays the same, and people reconnect on their own. Their route should then read "direct · same network".</li>
+    </ol>
+    <small>With this off, websites you use in this browser can see this computer's local network address (for example 192.168.1.20). It only means something inside your network. If your browser no longer lists that setting, or your computer is managed by IT, the policy <code>WebRtcLocalIpsAllowedUrls</code> set to <code>https://mikkaiser.github.io</code> does the same for this site only.</small>
+    <small>Some networks, often staff and guest Wi-Fi, block devices from reaching each other at all. There the relay is the only route, whatever this setting says.</small>
+  </div>
+</div>
+
+<div id="howModal" class="modal" hidden role="dialog" aria-modal="true" aria-label="How LAN Drop works">
   <div class="frame">
     <div class="bar-top">
       <span class="label">How LAN Drop works · 0:50</span>

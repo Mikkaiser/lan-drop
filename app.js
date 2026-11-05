@@ -230,7 +230,8 @@ async function remoteAddress(conn) {
   if (!pair) stats.forEach(r => { if (r.type === 'candidate-pair' && r.nominated && r.state === 'succeeded') pair = r; });
   const remote = pair && stats.get(pair.remoteCandidateId);
   if (!remote) return null;
-  return { ip: remote.address || remote.ip || '', type: remote.candidateType };
+  const local = stats.get(pair.localCandidateId);
+  return { ip: remote.address || remote.ip || '', type: remote.candidateType, localType: local?.candidateType };
 }
 
 // "iPhone · Safari" style label so the host can tell devices apart.
@@ -536,8 +537,15 @@ function acceptGuest(conn) {
       return;
     }
     let m; try { m = JSON.parse(d); } catch { return; }
+    const me = host.guests.get(conn);
+    if (me) me.lastSeen = Date.now();
 
-    if (m.t === 'hello') {
+    if (m.t === 'ping') {
+      if (me) me.pings = true;
+      return;
+    } else if (m.t === 'bye') {
+      return me?.drop?.();
+    } else if (m.t === 'hello') {
       const info = host.guests.get(conn);
       if (info) {
         info.device = String(m.device || '').slice(0, 40) || 'Unknown device';
@@ -609,33 +617,139 @@ function acceptGuest(conn) {
             e => { p.inc.finish(false).catch(() => {}); sendJSON(conn.dataChannel, { t: 'err', id, msg: e.message }); });
   }
 
-  conn.on('close', () => {
+  // Tidy up once, however we learn the guest is gone.
+  let gone = false;
+  const drop = () => {
+    if (gone) return;
+    gone = true;
     for (const cancel of gets.values()) cancel();
     for (const cancel of ranges.values()) cancel();
     for (const p of puts.values()) p.queue.finally(() => p.inc.finish(false));
     puts.clear();
+    if (conn.open) conn.close();
     if (isLane) return; // the guest re-sends that lane's segments on its other connections
     host.guests.delete(conn);
     for (const p of [...host.puts2.values()]) if (p.control === conn) abortPut2(p);
     updateGuestCount();
+  };
+  conn.on('close', drop);
+  // PeerJS often reports no close when the other side just disappears (tab closed, laptop asleep,
+  // Wi-Fi lost), so also watch the connection itself: failed, or dropped for more than 6 s.
+  conn.on('open', () => {
+    const pc = conn.peerConnection;
+    if (!pc) return;
+    let wait = null;
+    pc.addEventListener('connectionstatechange', () => {
+      clearTimeout(wait);
+      if (pc.connectionState === 'failed' || pc.connectionState === 'closed') drop();
+      else if (pc.connectionState === 'disconnected') wait = setTimeout(() => { if (pc.connectionState !== 'connected') drop(); }, 6000);
+    });
+    conn.dataChannel?.addEventListener('close', drop);
+    const info = host.guests.get(conn);
+    if (info) info.drop = drop;
   });
 }
+
+// Backstop for guests that vanish without any signal: pages that send heartbeats ('ping')
+// and haven't been heard from for a while are dropped. (Older cached pages send no pings.)
+const GUEST_TIMEOUT = 75 * 1000;
+setInterval(() => {
+  for (const info of host.guests.values()) {
+    if (info.pings && Date.now() - info.lastSeen > GUEST_TIMEOUT) info.drop?.();
+  }
+}, 10 * 1000);
+
+// ---------- routes: is a guest connected over the local network, the internet, or the relay? ----------
+
+const PRIVATE_IP = /^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|169\.254\.|fc|fd|fe80:)/i;
+const ROUTE_LABEL = { lan: 'direct · same network', internet: 'direct · internet', relay: 'via relay' };
+
+// From the chosen candidate pair; samePublicIp marks a guest behind the same router as us.
+function routeOf(addr, samePublicIp) {
+  if (!addr) return null;
+  if (addr.type === 'relay' || addr.localType === 'relay') return 'relay';
+  const ip = addr.ip || '';
+  if (addr.type === 'host' || PRIVATE_IP.test(ip) || ip.endsWith('.local')) return 'lan';
+  return samePublicIp ? 'lan' : 'internet';
+}
+
+// Chrome hides this computer's local address behind a random ".local" name unless told otherwise;
+// many networks can't resolve those names, so devices on the same network fall back to the relay.
+// 'hidden' | 'shown' | 'unknown'
+async function localAddressMode() {
+  try {
+    const pc = new RTCPeerConnection({ iceServers: [] });
+    pc.createDataChannel('probe');
+    const found = [];
+    pc.onicecandidate = e => {
+      const c = e.candidate;
+      if (c && (c.type === 'host' || / typ host /.test(c.candidate))) found.push(c.address || c.candidate.split(' ')[4] || '');
+    };
+    await pc.setLocalDescription(await pc.createOffer());
+    await new Promise(r => { pc.onicegatheringstatechange = () => pc.iceGatheringState === 'complete' && r(); setTimeout(r, 3000); });
+    pc.close();
+    if (!found.length) return 'unknown';
+    return found.every(a => a.endsWith('.local')) ? 'hidden' : 'shown';
+  } catch { return 'unknown'; }
+}
+
+function showLanMode() {
+  const line = $('#lanMode');
+  line.replaceChildren();
+  if (host.lanMode === 'shown') line.append('Direct local-network connections: on');
+  else if (host.lanMode === 'hidden') {
+    const how = el('button', { className: 'linkish', type: 'button', textContent: 'how to turn on' });
+    how.onclick = openLanHelp;
+    line.append('Direct local-network connections: off · ', how);
+  }
+  line.hidden = host.lanMode === 'unknown';
+}
+
+// Guests on our network (same public IP) that still go through the relay are slower than they need to be.
+function updateLanHint() {
+  const slow = [...host.guests.values()].filter(g =>
+    routeOf(g.addr, false) === 'relay' && g.publicIp && myPublicIp && g.publicIp === myPublicIp);
+  const hint = $('#lanHint');
+  hint.hidden = !slow.length;
+  if (!slow.length) return;
+  const who = slow.map(g => g.device).join(', ');
+  const verb = slow.length > 1 ? 'are' : 'is';
+  if (host.lanMode === 'shown') {
+    $('#lanHintText').textContent = `${who} ${verb} on your network but going through the relay. This browser already shares its local address, so this network probably keeps devices from reaching each other (common on staff and guest Wi-Fi). The relay is the only route here.`;
+    $('#lanHintBtn').hidden = true;
+  } else {
+    $('#lanHintText').textContent = `${who} ${verb} on your network but going through the relay, which is slower. Turn on direct connections in this browser for full local-network speed.`;
+    $('#lanHintBtn').hidden = false;
+  }
+}
+
+function openLanHelp() {
+  $('#lanHelpState').textContent = host.lanMode === 'shown'
+    ? 'This browser shares its local address: direct connections are on.'
+    : 'This browser hides its local address right now.';
+  $('#lanHelp').hidden = false;
+  $('#lanHelpClose').focus();
+}
+function closeLanHelp() { $('#lanHelp').hidden = true; }
 
 // Best address we can show: the real one if the browser reveals it, else the guest's public IP.
 // (Browsers hide local network IPs from web pages, so on a LAN the public IP is often all we get.)
 function guestAddress({ addr, publicIp }) {
-  const relay = addr?.type === 'relay' ? ' · via relay' : '';
   if (addr?.ip && !addr.ip.endsWith('.local') && addr.type !== 'relay') return addr.ip;
-  if (publicIp) return `${publicIp} (public)${relay}`;
-  if (!addr) return 'finding address…';
-  return relay ? 'via relay (IP hidden)' : 'IP hidden by browser';
+  if (publicIp) return `${publicIp} (public)`;
+  return addr ? 'IP hidden by browser' : 'finding address…';
 }
 
 function updateGuestCount() {
   const list = $('#guestList');
-  list.replaceChildren(...[...host.guests.values()].map(g =>
-    el('li', {}, el('span', { textContent: g.device }), el('code', { textContent: guestAddress(g) }))));
+  list.replaceChildren(...[...host.guests.values()].map(g => {
+    const route = routeOf(g.addr, !!g.publicIp && g.publicIp === myPublicIp);
+    return el('li', {}, el('span', { textContent: g.device }),
+      route ? el('code', { className: 'route ' + route, textContent: ROUTE_LABEL[route] }) : '',
+      el('code', { textContent: guestAddress(g) }));
+  }));
   list.hidden = !host.guests.size;
+  updateLanHint();
   if (!host.peer || host.peer.disconnected) return;
   const n = host.guests.size;
   setStatus(n ? `Sharing · ${n} ${n > 1 ? 'people' : 'person'} connected` : 'Sharing · waiting for others to join', true);
@@ -717,6 +831,7 @@ async function startHosting(dir) {
   showHostCode();
   showApp();
   openHostPeer();
+  localAddressMode().then(mode => { host.lanMode = mode; showLanMode(); updateLanHint(); });
   await rescan();
   setInterval(rescan, 2000);
   addEventListener('beforeunload', e => { if (host.guests.size) e.preventDefault(); });
@@ -912,6 +1027,12 @@ async function connectToHost() {
   conn.on('open', () => {
     clearTimeout(openTimeout); setStatus('Connected', true); setNotice('');
     sendJSON(conn.dataChannel, { t: 'hello', device: deviceLabel(), ip: myPublicIp });
+    // Show which route we ended up on (it can change in the first seconds, so look twice).
+    const show = () => remoteAddress(conn).then(a => {
+      const route = routeOf(a, false);
+      if (route && guest.conn === conn && conn.open) setStatus(`Connected · ${ROUTE_LABEL[route]}`, true);
+    }).catch(() => {});
+    show(); setTimeout(show, 3000);
   });
   conn.on('data', d => onGuestData(d, conn));
   conn.on('close', () => {
@@ -956,6 +1077,10 @@ async function startGuest(code) {
   guest.code = code.toUpperCase();
   $('#title').textContent = 'Share ' + guest.code;
   setStatus('Connecting…', false);
+  // Let the host know we're still here, and say goodbye when the page closes,
+  // so its list of connected people stays accurate.
+  setInterval(() => sendJSON(guestDC(), { t: 'ping' }), 10 * 1000);
+  addEventListener('pagehide', () => sendJSON(guestDC(), { t: 'bye' }));
 
   backend = {
     openLabel: 'Download',
@@ -1104,7 +1229,19 @@ function closeHowVideo() {
 $('#howBtn').onclick = openHowVideo;
 $('#howClose').onclick = closeHowVideo;
 $('#howModal').addEventListener('click', e => { if (e.target === $('#howModal')) closeHowVideo(); });
-addEventListener('keydown', e => { if (e.key === 'Escape' && !$('#howModal').hidden) closeHowVideo(); });
+addEventListener('keydown', e => {
+  if (e.key !== 'Escape') return;
+  if (!$('#howModal').hidden) closeHowVideo();
+  if (!$('#lanHelp').hidden) closeLanHelp();
+});
+
+// "Turn on direct connections" panel (host only)
+$('#lanHintBtn').onclick = openLanHelp;
+$('#lanHelpClose').onclick = closeLanHelp;
+$('#lanHelp').addEventListener('click', e => { if (e.target === $('#lanHelp')) closeLanHelp(); });
+for (const btn of document.querySelectorAll('[data-copy]')) {
+  btn.onclick = () => navigator.clipboard?.writeText(btn.dataset.copy).then(() => toast('Copied'), () => toast(btn.dataset.copy));
+}
 
 addEventListener('hashchange', () => location.reload());
 initStart();

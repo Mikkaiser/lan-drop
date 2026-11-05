@@ -62,6 +62,20 @@ One WebRTC connection only keeps a limited amount of data in flight, which caps 
 
 Limits that no app can get around: across different networks, speed can't exceed the sender's upload or the receiver's download. When two devices on the same network have to use the relay, every file goes out to the internet and back in, so it can't reach local network speed.
 
+### Direct connections on the same network
+
+WebRTC always tries the local network first. But Chrome and Edge hide each computer's local address behind a random `.local` name, and many networks can't resolve those names, so devices on the same network often fall back to the relay. LAN Drop helps with that:
+
+- **Routes on screen:** the host's list labels each person "direct · same network", "direct · internet" or "via relay", and each guest sees their own route in the status line.
+- **Hint:** when someone with the host's public IP (so almost certainly on the same network) is going through the relay, the host sees a hint and a one-time how-to: set **Anonymize local IPs exposed by WebRTC** to **Disabled** in `chrome://flags` (or `edge://flags`), or use the `WebRtcLocalIpsAllowedUrls` policy for this site only. Only the host's computer needs it.
+- **On/off line:** the host panel shows whether this browser currently hides its local address.
+
+Networks that isolate devices from each other (some staff and guest Wi-Fi) can't be helped; there the relay is the only route.
+
+### Who's connected
+
+Guests send a heartbeat every 10 s and a goodbye when their page closes. The host also watches each connection, so someone who closes the tab, loses Wi-Fi or puts their laptop to sleep drops off the list within seconds. Pages that send no heartbeat (older cached versions) are removed when their connection closes.
+
 ## The relay (`worker/`)
 
 A browser has to hold relay credentials itself, because the browser connects to the relay directly. `worker/` is a Cloudflare Worker that gives each visitor short-lived credentials (valid for 3 hours), so the long-lived TURN key never appears in the public page.
